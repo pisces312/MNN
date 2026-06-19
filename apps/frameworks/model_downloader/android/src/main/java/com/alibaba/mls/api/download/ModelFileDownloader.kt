@@ -71,10 +71,15 @@ class ModelFileDownloader {
                 hfFileMetadata.size,
                 fileDownloadTask.relativePath, fileDownloadListener
             )
-            createSymlink(
-                fileDownloadTask.blobPath!!.toPath(),
-                fileDownloadTask.pointerPath!!.toPath()
-            )
+            // Flat mode: blobPath == pointerPath means the file was downloaded
+            // directly into its final location (no blobs/symlink structure).
+            // Skip createSymlink to avoid deleting the just-downloaded file.
+            if (fileDownloadTask.blobPath!!.absolutePath != fileDownloadTask.pointerPath!!.absolutePath) {
+                createSymlink(
+                    fileDownloadTask.blobPath!!.toPath(),
+                    fileDownloadTask.pointerPath!!.toPath()
+                )
+            }
         }
     }
 

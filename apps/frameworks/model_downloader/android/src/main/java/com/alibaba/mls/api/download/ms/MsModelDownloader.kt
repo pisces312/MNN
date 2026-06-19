@@ -10,6 +10,7 @@ import com.alibaba.mls.api.download.DownloadFileUtils.createSymlink
 import com.alibaba.mls.api.download.DownloadFileUtils.deleteDirectoryRecursively
 import com.alibaba.mls.api.download.DownloadFileUtils.getLastFileName
 import com.alibaba.mls.api.download.DownloadFileUtils.getPointerPathParent
+import com.alibaba.mls.api.download.DownloadFileUtils.isSymlinkSupported
 import com.alibaba.mls.api.download.DownloadFileUtils.repoFolderName
 import com.alibaba.mls.api.download.DownloadPausedException
 import com.alibaba.mls.api.download.FileDownloadTask
@@ -113,7 +114,13 @@ class MsModelDownloader(override var callback: ModelRepoDownloadCallback?,
     }
 
     override fun getDownloadPath(modelId: String): File {
-        return getModelPath(cacheRootPath, modelId)
+        // Legacy: top-level symlink (internal storage / ext4)
+        val legacyLink = File(cacheRootPath, getLastFileName(modelId))
+        if (legacyLink.exists()) return legacyLink
+        // Flat mode (external storage / FUSE): real snapshots directory
+        val msModelId = ModelIdUtils.getRepositoryPath(modelId)
+        val repoFolder = repoFolderName(msModelId, "model")
+        return File(cacheRootPath, "$repoFolder/snapshots/_no_sha_")
     }
 
     override fun deleteRepo(modelId: String) {
@@ -191,11 +198,37 @@ class MsModelDownloader(override var callback: ModelRepoDownloadCallback?,
             callback?.onDownloadFileFinished(modelId, folderLinkFile.absolutePath)
             return
         }
+        // Detect symlink support: external storage (FUSE) does not support symlinks,
+        // so we use flat mode (files directly in snapshots/, no blobs/symlink layer).
+        val flatMode = !isSymlinkSupported(cacheRootPath)
+        Log.i(TAG, "downloadMsRepoInner: flatMode=$flatMode (symlinkSupported=${!flatMode})")
         val modelDownloader = ModelFileDownloader()
         val hasError = false
         val errorInfo = StringBuilder()
         val repoFolderName = repoFolderName(modelScopeId, "model")
         val storageFolder = File(this.cacheRootPath, repoFolderName)
+        // Flat mode migration: clean up legacy blobs/ + incomplete symlinks left by
+        // failed legacy-mode downloads on FUSE. Without this, blobs/ would accumulate
+        // orphan files (wasting space) since flat mode never reads from blobs/.
+        // Only clean if snapshots/ has no fully-downloaded flat files yet.
+        if (flatMode) {
+            val legacyBlobsDir = File(storageFolder, "blobs")
+            val flatSnapshotsDir = File(storageFolder, "snapshots/_no_sha_")
+            val hasFlatFiles = flatSnapshotsDir.exists() &&
+                flatSnapshotsDir.listFiles()?.any { it.isFile } == true
+            if (legacyBlobsDir.exists() && !hasFlatFiles) {
+                Log.i(TAG, "downloadMsRepoInner flatMode: cleaning legacy blobs dir " +
+                        "(no flat files yet): ${legacyBlobsDir.absolutePath}")
+                deleteDirectoryRecursively(legacyBlobsDir)
+                // Also remove stale snapshots/ symlinks (dangling after blobs removal)
+                val legacySnapshotsDir = File(storageFolder, "snapshots")
+                if (legacySnapshotsDir.exists()) {
+                    Log.i(TAG, "downloadMsRepoInner flatMode: cleaning legacy snapshots dir: " +
+                            legacySnapshotsDir.absolutePath)
+                    deleteDirectoryRecursively(legacySnapshotsDir)
+                }
+            }
+        }
         val parentPointerPath = getPointerPathParent(storageFolder, "_no_sha_")
         val downloadTaskList: List<FileDownloadTask>
         val totalAndDownloadSize = LongArray(2)
@@ -205,7 +238,8 @@ class MsModelDownloader(override var callback: ModelRepoDownloadCallback?,
             storageFolder,
             parentPointerPath,
             msRepoInfo,
-            totalAndDownloadSize
+            totalAndDownloadSize,
+            flatMode
         )
         Log.d(TAG, "downloadMsRepoInner downloadTaskList： " + downloadTaskList.size)
         val fileDownloadListener =
@@ -237,11 +271,17 @@ class MsModelDownloader(override var callback: ModelRepoDownloadCallback?,
             return
         }
         if (!hasError) {
-            val folderLinkPath = folderLinkFile.absolutePath
-            Log.d(TAG, "downloadMsRepoInner loop finished, creating symlink for $modelId")
-            createSymlink(parentPointerPath.toString(), folderLinkPath)
-            Log.d(TAG, "downloadMsRepoInner symlink created, calling onDownloadFileFinished")
-            callback?.onDownloadFileFinished(modelId, folderLinkPath)
+            if (flatMode) {
+                // Flat mode: no top-level symlink, return snapshots dir directly as model path
+                Log.d(TAG, "downloadMsRepoInner flat mode: using snapshots dir as model path")
+                callback?.onDownloadFileFinished(modelId, parentPointerPath.absolutePath)
+            } else {
+                val folderLinkPath = folderLinkFile.absolutePath
+                Log.d(TAG, "downloadMsRepoInner loop finished, creating symlink for $modelId")
+                createSymlink(parentPointerPath.toString(), folderLinkPath)
+                Log.d(TAG, "downloadMsRepoInner symlink created, calling onDownloadFileFinished")
+                callback?.onDownloadFileFinished(modelId, folderLinkPath)
+            }
             Log.d(TAG, "downloadMsRepoInner callback return")
         } else {
             Log.e(
@@ -256,7 +296,8 @@ class MsModelDownloader(override var callback: ModelRepoDownloadCallback?,
         storageFolder: File,
         parentPointerPath: File,
         msRepoInfo: MsRepoInfo,
-        totalAndDownloadSize: LongArray
+        totalAndDownloadSize: LongArray,
+        flatMode: Boolean = false
     ): List<FileDownloadTask> {
         val fileDownloadTasks: MutableList<FileDownloadTask> = ArrayList()
         for (i in msRepoInfo.Data?.Files?.indices!!) {
@@ -275,10 +316,18 @@ class MsModelDownloader(override var callback: ModelRepoDownloadCallback?,
             fileDownloadTask.fileMetadata!!.size = subFile.Size
             fileDownloadTask.fileMetadata!!.etag = subFile.Sha256
             fileDownloadTask.etag = subFile.Sha256
-            fileDownloadTask.blobPath = File(storageFolder, "blobs/" + subFile.Sha256)
-            fileDownloadTask.blobPathIncomplete =
-                File(storageFolder, "blobs/" + subFile.Sha256 + ".incomplete")
             fileDownloadTask.pointerPath = File(parentPointerPath, subFile.Path)
+            if (flatMode) {
+                // Flat mode: download directly into pointerPath, no blobs/symlink layer.
+                // blobPath == pointerPath so ModelFileDownloader skips createSymlink.
+                fileDownloadTask.blobPath = fileDownloadTask.pointerPath
+                fileDownloadTask.blobPathIncomplete =
+                    File(parentPointerPath, subFile.Path + ".incomplete")
+            } else {
+                fileDownloadTask.blobPath = File(storageFolder, "blobs/" + subFile.Sha256)
+                fileDownloadTask.blobPathIncomplete =
+                    File(storageFolder, "blobs/" + subFile.Sha256 + ".incomplete")
+            }
             fileDownloadTask.downloadedSize =
                 if (fileDownloadTask.blobPath!!.exists()) fileDownloadTask.blobPath!!.length() else (if (fileDownloadTask.blobPathIncomplete!!.exists()) fileDownloadTask.blobPathIncomplete!!.length() else 0)
             totalAndDownloadSize[0] += subFile.Size
