@@ -147,6 +147,17 @@
     <string name="diffusion_mode_memory_balance">Memory Balance Mode</string>
     <string name="diffusion_memory_mode">Diffusion Memory Mode</string>
     <string name="voice_model_management">Voice Model Management</string>
+    <string name="model_storage_path">Model storage path</string>
+    <string name="model_storage_path_dialog_title">Choose model storage path</string>
+    <string name="change">Change</string>
+    <string name="restore_default">Restore default</string>
+    <string name="view_logs">View Logs</string>
+    <string name="log_dialog_title">Recent Logs</string>
+    <string name="log_clear">Clear</string>
+    <string name="log_copy">Copy</string>
+    <string name="log_empty">No logs yet</string>
+    <string name="browse">Browse</string>
+    <string name="type_path">Type path</string>
     <string name="storage_management">Storage management</string>
     <string name="storage_summary_internal">Internal Storage</string>
     <string name="storage_summary_model">Model Storage</string>

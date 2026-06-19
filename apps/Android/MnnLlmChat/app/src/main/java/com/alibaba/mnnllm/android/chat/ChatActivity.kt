@@ -4,9 +4,12 @@ package com.alibaba.mnnllm.android.chat
 
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.util.Log
 import android.view.Menu
 import android.view.MenuItem
@@ -25,6 +28,7 @@ import com.alibaba.mnnllm.android.BuildConfig
 import com.alibaba.mnnllm.android.audio.AudioChunksPlayer
 import com.alibaba.mnnllm.android.benchmark.BenchmarkModule
 import com.alibaba.mnnllm.android.modelist.ModelListManager
+import com.alibaba.mnnllm.android.utils.AppLogger
 import com.alibaba.mnnllm.android.utils.WavFileWriter
 import com.alibaba.mnnllm.android.utils.FileUtils
 import com.alibaba.mnnllm.android.chat.chatlist.ChatListComponent
@@ -112,6 +116,7 @@ class ChatActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityChatBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        checkStoragePermission()
         val toolbar = binding.toolbar
         setSupportActionBar(toolbar)
 
@@ -1049,6 +1054,25 @@ class ChatActivity : AppCompatActivity() {
         }
         fun setChatPresenter(chatPresenter: ChatPresenter?) {
             _chatPresenter = chatPresenter
+        }
+    }
+
+    private fun checkStoragePermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (!Environment.isExternalStorageManager()) {
+                AppLogger.w(TAG, "MANAGE_EXTERNAL_STORAGE not granted, requesting...")
+                try {
+                    val intent = Intent(
+                        Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                        Uri.parse("package:$packageName")
+                    )
+                    startActivity(intent)
+                } catch (e: Exception) {
+                    AppLogger.e(TAG, "Failed to open storage permission settings: ${e.message}")
+                }
+            } else {
+                AppLogger.i(TAG, "MANAGE_EXTERNAL_STORAGE granted")
+            }
         }
     }
 }
