@@ -78,8 +78,11 @@ class HfModelDownloader(override var callback: ModelRepoDownloadCallback?,
         return withContext(DownloadCoroutineManager.downloadDispatcher) {
             runCatching {
                 val hfModelId = hfModelId(modelId)
+                val host = getHfApiClient().host
+                Log.i(TAG, "fetchRepoInfo: modelId=$modelId, hfModelId=$hfModelId, host=$host")
                 // Add Authorization header if token is available (future improvement)
                 val response = getHfApiClient().getRepoTree(hfModelId, "main").execute()
+                Log.i(TAG, "fetchRepoInfo: response code=${response?.code()}, isSuccessful=${response?.isSuccessful}")
                 if (response?.isSuccessful == true && response.body() != null) {
                     val treeItems: List<HfTreeItem> = response.body()!!
                     // Build HfRepoInfo from tree items
@@ -120,10 +123,11 @@ class HfModelDownloader(override var callback: ModelRepoDownloadCallback?,
                     } else {
                         "API response was null or empty"
                     }
+                    Log.e(TAG, "fetchRepoInfo failed for $modelId: $errorMsg")
                     throw FileDownloadException("Failed to fetch repo info for $modelId: $errorMsg")
                 }
             }.getOrElse { exception ->
-                Log.e(TAG, "Failed to fetch repo info for $modelId", exception)
+                Log.e(TAG, "fetchRepoInfo exception for $modelId: ${exception.javaClass.name}: ${exception.message}", exception)
                 throw FileDownloadException("Failed to fetch repo info for $modelId: ${exception.message}")
             }
         }
@@ -142,13 +146,20 @@ class HfModelDownloader(override var callback: ModelRepoDownloadCallback?,
     }
 
     override fun download(modelId: String) {
+        Log.d(TAG, "download: modelId=$modelId, cacheRootPath=$cacheRootPath")
         DownloadCoroutineManager.launchDownload {
             try {
                 callback?.onDownloadPending(modelId)
+                Log.d(TAG, "download: fetching repo info for $modelId")
                 val repoInfo = fetchRepoInfo(modelId)
+                Log.d(TAG, "download: repo info fetched, siblings=${repoInfo.getSiblings().size}")
                 downloadHfRepo(repoInfo)
             } catch (e: FileDownloadException) {
+                Log.e(TAG, "download failed for $modelId: ${e.message}", e)
                 callback?.onDownloadFailed(modelId, e)
+            } catch (e: Exception) {
+                Log.e(TAG, "download unexpected error for $modelId: ${e.message}", e)
+                callback?.onDownloadFailed(modelId, FileDownloadException("Unexpected error: ${e.message}"))
             }
         }
     }
@@ -207,7 +218,10 @@ class HfModelDownloader(override var callback: ModelRepoDownloadCallback?,
 
     private fun downloadHfRepoInner(hfRepoInfo: HfRepoInfo) {
         val folderLinkFile = File(cacheRootPath, getLastFileName(hfRepoInfo.modelId!!))
+        Log.i(TAG, "downloadHfRepoInner: modelId=${hfRepoInfo.modelId}, cacheRootPath=$cacheRootPath, " +
+                "folderLinkFile=${folderLinkFile.absolutePath}, exists=${folderLinkFile.exists()}")
         if (folderLinkFile.exists()) {
+            Log.d(TAG, "downloadHfRepoInner: already downloaded, calling onDownloadFileFinished")
             callback?.onDownloadFileFinished(hfRepoInfo.modelId!!, folderLinkFile.absolutePath)
             return
         }

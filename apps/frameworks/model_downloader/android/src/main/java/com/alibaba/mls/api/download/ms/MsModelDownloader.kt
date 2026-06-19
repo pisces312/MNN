@@ -57,17 +57,20 @@ class MsModelDownloader(override var callback: ModelRepoDownloadCallback?,
      * @throws FileDownloadException if failed to fetch repo info
      */
     private suspend fun fetchRepoInfo(modelId: String, calculateSize: Boolean = false): MsRepoInfo {
-        Log.d(TAG, "fetchRepoInfo called for modelId: $modelId, calculateSize: $calculateSize")
+        Log.i(TAG, "fetchRepoInfo: modelId=$modelId, calculateSize=$calculateSize")
         
         return withContext(DownloadCoroutineManager.downloadDispatcher) {
             runCatching {
                 val msModelId = ModelIdUtils.getRepositoryPath(modelId)
+                Log.i(TAG, "fetchRepoInfo: msModelId=$msModelId")
                 val split = msModelId.split("/".toRegex()).dropLastWhile { it.isEmpty() }.toTypedArray()
                 if (split.size != 2) {
+                    Log.e(TAG, "fetchRepoInfo: invalid modelId format: $modelId -> $msModelId")
                     throw FileDownloadException("Invalid model ID format for $modelId, expected format: owner/repo")
                 }
                 
                 val response = msApiClient.apiService.getModelFiles(split[0], split[1]).execute()
+                Log.i(TAG, "fetchRepoInfo: response code=${response.code()}, isSuccessful=${response.isSuccessful}")
                 if (response.isSuccessful && response.body() != null) {
                     val repoInfo = response.body()!!
                     
@@ -84,18 +87,18 @@ class MsModelDownloader(override var callback: ModelRepoDownloadCallback?,
                     } else {
                         "API response was null or empty"
                     }
+                    Log.e(TAG, "fetchRepoInfo failed for $modelId: $errorMsg")
                     throw FileDownloadException("Failed to fetch repo info for $modelId: $errorMsg")
                 }
             }.getOrElse { exception ->
-                Log.e(TAG, "Failed to fetch repo info for $modelId", exception)
+                Log.e(TAG, "fetchRepoInfo exception for $modelId: ${exception.javaClass.name}: ${exception.message}", exception)
                 throw FileDownloadException("Failed to fetch repo info for $modelId: ${exception.message}")
             }
         }
     }
 
     override fun download(modelId: String) {
-        Log.d(TAG, "MsModelDownloader download: $modelId")
-        
+        Log.i(TAG, "download: modelId=$modelId, cacheRootPath=$cacheRootPath")
         DownloadCoroutineManager.launchDownload {
             downloadMsRepo(modelId)
         }
@@ -153,15 +156,16 @@ class MsModelDownloader(override var callback: ModelRepoDownloadCallback?,
 
     private suspend fun downloadMsRepo(modelId: String) {
         val modelScopeId = ModelIdUtils.getRepositoryPath(modelId)
-        Log.d(TAG, "MsModelDownloader downloadMsRepo: $modelId modelScopeId : $modelScopeId")
+        Log.i(TAG, "downloadMsRepo: modelId=$modelId, modelScopeId=$modelScopeId, cacheRootPath=$cacheRootPath")
         val split = modelScopeId.split("/".toRegex()).dropLastWhile { it.isEmpty() }.toTypedArray()
         if (split.size != 2) {
+            Log.e(TAG, "downloadMsRepo: invalid modelId format: $modelId")
             callback?.onDownloadFailed(modelId, FileDownloadException("getRepoInfoFailed modelId format error: $modelId"))
             return
         }
         try {
             val repoInfo = fetchRepoInfo(modelId, calculateSize = true)
-            Log.d(TAG, "downloadMsRepo repoInfo: $repoInfo")
+            Log.i(TAG, "downloadMsRepo: repoInfo fetched, files=${repoInfo.Data?.Files?.size ?: 0}")
             callback?.onDownloadTaskAdded()
             // Run the actual download on IO dispatcher to avoid blocking  
             withContext(Dispatchers.IO) {
@@ -169,19 +173,21 @@ class MsModelDownloader(override var callback: ModelRepoDownloadCallback?,
             }
             callback?.onDownloadTaskRemoved()
         } catch (e: FileDownloadException) {
+            Log.e(TAG, "downloadMsRepo failed for $modelId: ${e.message}", e)
             callback?.onDownloadFailed(modelId, e)
         } catch (e: Exception) {
-            Log.e(TAG, "downloadMsRepo failed", e)
+            Log.e(TAG, "downloadMsRepo unexpected error for $modelId: ${e.javaClass.name}: ${e.message}", e)
             callback?.onDownloadFailed(modelId, FileDownloadException(e.message))
         }
     }
 
     private fun downloadMsRepoInner(modelId:String, modelScopeId: String, msRepoInfo: MsRepoInfo) {
-        Log.d(TAG, "downloadMsRepoInner")
+        Log.i(TAG, "downloadMsRepoInner: modelId=$modelId, cacheRootPath=$cacheRootPath")
         val folderLinkFile =
             File(cacheRootPath, getLastFileName(modelScopeId))
+        Log.i(TAG, "downloadMsRepoInner: folderLinkFile=${folderLinkFile.absolutePath}, exists=${folderLinkFile.exists()}")
         if (folderLinkFile.exists()) {
-            Log.d(TAG, "downloadMsRepoInner already exists")
+            Log.d(TAG, "downloadMsRepoInner: already exists, calling onDownloadFileFinished")
             callback?.onDownloadFileFinished(modelId, folderLinkFile.absolutePath)
             return
         }

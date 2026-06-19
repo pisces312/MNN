@@ -17,6 +17,7 @@ import com.alibaba.mnnllm.android.model.ModelTypeUtils
 import com.alibaba.mnnllm.android.chat.model.ChatDataManager
 import com.alibaba.mnnllm.android.download.DownloadForegroundServiceManager
 import com.alibaba.mnnllm.android.modelmarket.ModelMarketCache
+import com.alibaba.mnnllm.android.utils.AppLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -290,16 +291,17 @@ class ModelMarketViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     override fun onDownloadFailed(modelId: String, e: Exception) {
-        Log.d(TAG, "[onDownloadFailed] Received for modelId: $modelId, error: ${e.message}")
+        val errorDetail = "${e.javaClass.name}: ${e.message}"
+        Log.e(TAG, "[onDownloadFailed] modelId=$modelId, error=$errorDetail", e)
+        AppLogger.e(TAG, "[onDownloadFailed] modelId=$modelId, error=$errorDetail")
         mainHandler.post {
             val wrapper = allModels.find { it.modelMarketItem.modelId == modelId }
             if (wrapper != null) {
-                Log.d(TAG, "[onDownloadFailed] Found wrapper for $modelId. Updating info.")
+                AppLogger.d(TAG, "[onDownloadFailed] Found wrapper for $modelId, updating UI")
                 updateDownloadInfo(modelId, downloadManager.getDownloadInfo(wrapper.modelMarketItem.modelId))
                 _itemUpdate.value = modelId
-                Log.d(TAG, "[onDownloadFailed] Fired _itemUpdate for $modelId.")
             } else {
-                Log.e(TAG, "[onDownloadFailed] Could not find wrapper for modelId: $modelId")
+                AppLogger.e(TAG, "[onDownloadFailed] Could not find wrapper for modelId: $modelId (model not in market list)")
             }
             DownloadForegroundServiceManager.onDownloadStateChanged(
                 modelId = modelId,
