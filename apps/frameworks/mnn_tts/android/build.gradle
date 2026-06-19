@@ -15,7 +15,7 @@ apply plugin: 'org.jetbrains.kotlin.android'
 android {
     namespace 'com.alibaba.mnn.tts'
     compileSdk 34
-    ndkVersion "27.2.12479018"
+    ndkVersion "27.0.12077973"
     sourceSets {
         main.java.srcDirs += ['java']
     }
