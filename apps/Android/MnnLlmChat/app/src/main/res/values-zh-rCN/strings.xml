@@ -139,6 +139,17 @@
     <string name="diffusion_mode_memory_balance">内存平衡模式</string>
     <string name="diffusion_memory_mode">Diffusion内存模式</string>
     <string name="voice_model_management">语音模型管理</string>
+    <string name="model_storage_path">模型存储路径</string>
+    <string name="model_storage_path_dialog_title">选择模型存储目录</string>
+    <string name="change">修改</string>
+    <string name="restore_default">恢复默认</string>
+    <string name="view_logs">查看日志</string>
+    <string name="log_dialog_title">最近日志</string>
+    <string name="log_clear">清除</string>
+    <string name="log_copy">复制</string>
+    <string name="log_empty">暂无日志</string>
+    <string name="browse">浏览选择</string>
+    <string name="type_path">手动输入</string>
     <string name="storage_management">存储管理</string>
     <string name="storage_summary_internal">内部存储</string>
     <string name="storage_summary_model">模型存储</string>

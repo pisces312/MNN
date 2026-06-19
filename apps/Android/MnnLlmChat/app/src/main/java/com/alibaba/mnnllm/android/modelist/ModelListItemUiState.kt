@@ -181,7 +181,9 @@ internal object ModelListItemUiStateFactory {
             localPath.contains("/modelscope/") -> context.getString(R.string.modelscope)
             localPath.contains("/modelers/") -> context.getString(R.string.modelers)
             localPath.contains("/builtin/") -> context.getString(R.string.builtin)
-            localPath.contains(".mnnmodels") -> context.getString(R.string.huggingface)
+            // Legacy HF path uses .mnnmodels root; flat mode uses /hf/ subdirectory
+            localPath.contains(".mnnmodels") || localPath.contains("/hf/") ->
+                context.getString(R.string.huggingface)
             else -> null
         }
     }

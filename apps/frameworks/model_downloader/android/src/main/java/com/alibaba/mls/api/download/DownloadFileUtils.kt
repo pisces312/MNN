@@ -104,6 +104,44 @@ object DownloadFileUtils {
                 Files.delete(linkPath)
                 Files.createSymbolicLink(linkPath, target)
             }
+        } catch (e: java.nio.file.AccessDeniedException) {
+            // FUSE / sdcardfs (external storage) does not support symbolic links.
+            // Fallback: copy file content so the link path becomes a real file.
+            // Directory symlink targets are not supported here — callers must use
+            // flat mode (see isSymlinkSupported) to avoid directory symlinks.
+            Log.w(TAG, "createSymlink denied (FUSE?), falling back to copy: $linkPath -> $target", e)
+            val tgtFile = target?.toFile()
+            val linkFile = linkPath?.toFile()
+            if (tgtFile != null && linkFile != null && tgtFile.isFile) {
+                Files.copy(target, linkPath, StandardCopyOption.REPLACE_EXISTING)
+            } else {
+                throw e
+            }
+        }
+    }
+
+    /**
+     * Probe whether the filesystem at [rootPath] supports symbolic links.
+     * External storage (/storage/emulated/0/...) mounted via FUSE/sdcardfs does NOT,
+     * even with MANAGE_EXTERNAL_STORAGE permission. Internal storage (ext4) does.
+     *
+     * Callers should use flat mode (skip blobs + symlinks) when this returns false.
+     */
+    @JvmStatic
+    fun isSymlinkSupported(rootPath: String): Boolean {
+        val root = File(rootPath)
+        if (!root.exists() && !root.mkdirs()) return false
+        val probe = File(root, ".symlink_probe_${System.nanoTime()}")
+        val probePath = probe.toPath()
+        val targetPath = Paths.get(".")
+        return try {
+            Files.createSymbolicLink(probePath, targetPath)
+            Files.deleteIfExists(probePath)
+            true
+        } catch (e: Exception) {
+            // AccessDeniedException (FUSE) or FileSystemException — not supported
+            Log.i(TAG, "isSymlinkSupported($rootPath)=false: ${e.javaClass.simpleName}: ${e.message}")
+            false
         }
     }
 

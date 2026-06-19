@@ -756,8 +756,9 @@ object ModelListManager {
                 Timber.w(e, "Failed to initialize ModelMarketCache")
             }
 
-            // Load downloaded models from .mnnmodels directory
-            val mnnModelsDir = File(context.filesDir, ".mnnmodels")
+            // Load downloaded models from configured model storage directory.
+            // Defaults to filesDir/.mnnmodels; may be a custom external path set by the user.
+            val mnnModelsDir = File(com.alibaba.mnnllm.android.mainsettings.MainSettings.getModelStoragePath(context))
 
             if (mnnModelsDir.exists() && mnnModelsDir.isDirectory) {
                 scanModelsDirectory(mnnModelsDir, context, chatDataManager, downloadedModels)
@@ -976,7 +977,12 @@ object ModelListManager {
         logger: StringBuilder? = null,
         dryRun: Boolean = false
     ) {
-        val indent = if (logger != null) "  ".repeat(directory.absolutePath.split(File.separator).size - (context.filesDir.absolutePath.split(File.separator).size + 1)) else ""
+        // Indent based on depth relative to the model storage root (works for both default and custom paths)
+        val storageRoot = com.alibaba.mnnllm.android.mainsettings.MainSettings.getModelStoragePath(context)
+        val rootDepth = storageRoot.split(File.separator).size
+        val dirDepth = directory.absolutePath.split(File.separator).size
+        val depth = (dirDepth - rootDepth).coerceAtLeast(0)
+        val indent = if (logger != null) "  ".repeat(depth) else ""
         logger?.append("${indent}Scanning Dir: ${directory.name}\n")
         
         try {
@@ -994,12 +1000,34 @@ object ModelListManager {
 
             files.forEach { file ->
                 val isBuiltinModel = directory.name == "builtin"
-                
-                // Logic 0: Skip HuggingFace cache directories (format: models--{org}--{repo})
-                // These are HuggingFace Hub cache container directories, not actual models
+
+                // Logic 0: HuggingFace/ModelScope cache container directories (models--{org}--{repo}).
+                // Legacy mode (internal storage, ext4): the real model is a top-level symlink next to
+                // this dir, so we skip the container. Flat mode (external storage, FUSE): there is no
+                // top-level symlink; the real model files live under models--xxx/snapshots/{sha}/.
+                // So in flat mode we must recurse into the container to find the snapshots dir.
                 if (file.isDirectory && file.name.startsWith("models--")) {
-                    logger?.append("${indent}[SKIP HF CACHE] ${file.name}\n")
+                    // Detect flat mode: a snapshots/ subdirectory with real subdirectories exists.
+                    val snapshotsDir = File(file, "snapshots")
+                    val hasFlatSnapshots = snapshotsDir.exists() && snapshotsDir.isDirectory &&
+                        snapshotsDir.listFiles()?.any { it.isDirectory && File(it, "config.json").exists() } == true
+                    if (hasFlatSnapshots) {
+                        logger?.append("${indent}[RECURSE FLAT HF CACHE] ${file.name}\n")
+                        scanModelsDirectory(snapshotsDir, context, chatDataManager, downloadedModels, logger, dryRun)
+                    } else {
+                        logger?.append("${indent}[SKIP HF CACHE] ${file.name}\n")
+                    }
                     return@forEach
+                }
+
+                // Logic 0b: Inside a snapshots/ directory (flat mode), each subdirectory is a real
+                // model directory named by sha (e.g. _no_sha_ or a commit hash). Process them directly.
+                if (file.isDirectory && directory.name == "snapshots") {
+                    val configFile = File(file, "config.json")
+                    if (configFile.exists()) {
+                        logger?.append("${indent}[FLAT SNAPSHOT] ${file.name}\n")
+                        // Treat this as a model candidate directly; fall through to Logic 2.
+                    }
                 }
 
                 // Logic 1: Priority Recurse
@@ -1177,7 +1205,7 @@ object ModelListManager {
         val sb = StringBuilder()
         sb.append("=== ModelListManager Debug Scan (Dry Run) ===\n")
         try {
-            val directory = File(context.filesDir, ".mnnmodels")
+            val directory = File(com.alibaba.mnnllm.android.mainsettings.MainSettings.getModelStoragePath(context))
             sb.append("Root: ${directory.absolutePath}\n")
             
             if (!directory.exists()) {
@@ -1373,12 +1401,32 @@ object ModelListManager {
      * Create model ID from path (same logic as ModelListPresenter)
      */
     private fun createModelIdFromPath(context: Context, absolutePath: String): String? {
-        // Extract the relative path from .mnnmodels directory
-        val mnnModelsPath = File(context.filesDir, ".mnnmodels").absolutePath
+        // Resolve the root model storage path. Defaults to filesDir/.mnnmodels, but may be a
+        // custom external path set by the user via MainSettings. Scan should work for both.
+        val mnnModelsPath = com.alibaba.mnnllm.android.mainsettings.MainSettings.getModelStoragePath(context)
+        // Compute relative path from the storage root.
         if (!absolutePath.startsWith(mnnModelsPath)) {
             return null
         }
-        val relativePath = absolutePath.substring(mnnModelsPath.length + 1)
+        val relativePath = absolutePath.substring(mnnModelsPath.length).trimStart(File.separatorChar)
+
+        // Flat mode path: modelscope/models--{org}--{repo}/snapshots/{sha}/  (or hf/...)
+        // Strip the snapshots/{sha} suffix to get back to the models--{org}--{repo} container,
+        // then reconstruct the modelId.
+        val flatSnapshotsRegex = Regex("^(modelscope|hf|modelers)/models--(.+?)/snapshots/[^/]+/?$")
+        val flatMatch = flatSnapshotsRegex.matchEntire(relativePath)
+        if (flatMatch != null) {
+            val source = flatMatch.groupValues[1]
+            val repoPath = flatMatch.groupValues[2].replace("--", "/")
+            return when (source) {
+                "modelscope" -> "ModelScope/$repoPath"
+                "hf" -> "HuggingFace/$repoPath"
+                "modelers" -> "Modelers/$repoPath"
+                else -> null
+            }
+        }
+
+        // Legacy mode path: container/{modelName}  (e.g. modelscope/MiniMind2-MNN)
         return when {
             relativePath.startsWith("modelers/") -> {
                 val modelName = relativePath.substring("modelers/".length)

@@ -5,6 +5,7 @@ package com.alibaba.mnnllm.android.mainsettings
 import android.content.Context
 import androidx.preference.PreferenceManager
 import com.alibaba.mls.api.source.ModelSources
+import com.alibaba.mnnllm.android.utils.AppLogger
 import com.alibaba.mnnllm.android.utils.DeviceUtils
 
 
@@ -92,6 +93,40 @@ object MainSettings {
      */
     fun isDefaultAsrModel(context: Context, modelId: String): Boolean {
         return getDefaultAsrModel(context) == modelId
+    }
+
+    /**
+     * Get the custom model storage path, or the default internal path.
+     */
+    fun getModelStoragePath(context: Context): String {
+        val sharedPreferences = PreferenceManager.getDefaultSharedPreferences(context)
+        val customPath = sharedPreferences.getString("model_storage_path", null)
+        if (!customPath.isNullOrBlank()) {
+            val dir = java.io.File(customPath)
+            if (dir.exists() && dir.canWrite()) {
+                return customPath
+            } else {
+                AppLogger.w("MainSettings", "Custom path invalid (exists=${dir.exists()}, writable=${dir.canWrite()}): $customPath")
+            }
+        }
+        return context.filesDir.absolutePath + "/.mnnmodels"
+    }
+
+    /**
+     * Set the custom model storage path.
+     */
+    fun setModelStoragePath(context: Context, path: String?) {
+        val sharedPreferences = PreferenceManager.getDefaultSharedPreferences(context)
+        sharedPreferences.edit()
+            .putString("model_storage_path", path)
+            .apply()
+    }
+
+    /**
+     * Reset storage path to default (clear custom path).
+     */
+    fun resetModelStoragePath(context: Context) {
+        setModelStoragePath(context, null)
     }
 
 }

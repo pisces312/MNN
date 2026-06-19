@@ -424,8 +424,8 @@ object ModelDeletionHelper {
             }
         }
 
-        // Calculate model storage size
-        val mnnModelsDir = File(filesDir, ".mnnmodels")
+        // Calculate model storage size (may be on external storage if user customized the path)
+        val mnnModelsDir = File(com.alibaba.mnnllm.android.mainsettings.MainSettings.getModelStoragePath(context))
         val modelStorageSize = if (mnnModelsDir.exists()) calculateDirSize(mnnModelsDir) else 0L
 
         // Get internal storage stats

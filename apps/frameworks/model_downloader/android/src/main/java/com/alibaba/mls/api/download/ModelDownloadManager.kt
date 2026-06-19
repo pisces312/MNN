@@ -16,7 +16,9 @@ import java.io.File
  */
 class ModelDownloadManager(context: Context) : ModelRepoDownloader.ModelRepoDownloadCallback {
 
-    private val cacheDir: String = context.filesDir.absolutePath + "/.mnnmodels"
+    @Volatile
+    var cacheDir: String = context.filesDir.absolutePath + "/.mnnmodels"
+        private set
     private val hfDownloader: HfModelDownloader
     private val msDownloader: MsModelDownloader
 
@@ -26,6 +28,42 @@ class ModelDownloadManager(context: Context) : ModelRepoDownloader.ModelRepoDown
     init {
         hfDownloader = HfModelDownloader(this, cacheDir)
         msDownloader = MsModelDownloader(this, cacheDir)
+    }
+
+    /**
+     * Update the model cache directory and refresh both downloaders.
+     * Call this after the storage path preference changes.
+     * @throws java.io.IOException if the directory cannot be created or is not writable
+     */
+    fun updateCacheDir(newPath: String) {
+        android.util.Log.i(TAG, "updateCacheDir: newPath=$newPath, currentCacheDir=$cacheDir")
+        val dir = java.io.File(newPath)
+        if (!dir.exists()) {
+            android.util.Log.i(TAG, "updateCacheDir: directory does not exist, attempting mkdirs()")
+            if (!dir.mkdirs()) {
+                val msg = "Failed to create directory: $newPath (check permissions)"
+                android.util.Log.e(TAG, msg)
+                throw java.io.IOException(msg)
+            }
+            android.util.Log.i(TAG, "updateCacheDir: directory created successfully")
+        }
+        if (!dir.canWrite()) {
+            val msg = "Directory not writable: $newPath"
+            android.util.Log.e(TAG, msg)
+            throw java.io.IOException(msg)
+        }
+        val oldPath = cacheDir
+        cacheDir = newPath
+        hfDownloader.cacheRootPath = newPath
+        // MsModelDownloader wraps cacheRootPath with a /modelscope subdirectory on construction
+        // (see MsModelDownloader.getCachePathRoot). Apply the same wrapping here so the on-disk
+        // layout stays consistent between the default path (filesDir/.mnnmodels/modelscope/...)
+        // and any custom storage path (customPath/modelscope/...). Without this, MS models would
+        // be written directly under customPath/ and could collide with HF models of the same name.
+        msDownloader.cacheRootPath = MsModelDownloader.getCachePathRoot(newPath)
+        downloadInfoMap.clear()
+        android.util.Log.i(TAG, "updateCacheDir: success. old=$oldPath, new=$newPath, " +
+                "hfCacheRoot=${hfDownloader.cacheRootPath}, msCacheRoot=${msDownloader.cacheRootPath}")
     }
     
     // Cache for download info to support progress and pause states
@@ -71,6 +109,8 @@ class ModelDownloadManager(context: Context) : ModelRepoDownloader.ModelRepoDown
     fun getProgressCallbackIntervalMs(): Long = progressCallbackIntervalMs
 
     fun startDownload(modelId: String) {
+        android.util.Log.i(TAG, "startDownload: modelId=$modelId, cacheDir=$cacheDir, " +
+                "hfCacheRoot=${hfDownloader.cacheRootPath}, msCacheRoot=${msDownloader.cacheRootPath}")
         // Clear stale pause flags (e.g. after deleteModel on an idle task).
         hfDownloader.clearPause(modelId)
         msDownloader.clearPause(modelId)
@@ -81,18 +121,21 @@ class ModelDownloadManager(context: Context) : ModelRepoDownloader.ModelRepoDown
         info.downloadState = DownloadState.PREPARING
         info.downlodaState = DownloadState.PREPARING
         info.progress = 0.0
+        info.errorMessage = null
+        info.errorException = null
         downloadListeners.forEach { it.onDownloadStart(modelId) }
         
         when {
             modelId.startsWith("HuggingFace/") || modelId.startsWith("Huggingface/") -> {
+                android.util.Log.i(TAG, "startDownload: routing to HfModelDownloader")
                 hfDownloader.download(modelId)
             }
             modelId.startsWith("ModelScope/") -> {
+                android.util.Log.i(TAG, "startDownload: routing to MsModelDownloader")
                 msDownloader.download(modelId)
             }
             else -> {
-                // Default to ModelScope for unprefixed models
-                // This supports models like "taobao-mnn/..." from ModelScope
+                android.util.Log.i(TAG, "startDownload: unprefixed modelId, defaulting to MsModelDownloader")
                 msDownloader.download(modelId)
             }
         }
@@ -214,6 +257,7 @@ class ModelDownloadManager(context: Context) : ModelRepoDownloader.ModelRepoDown
     // ModelRepoDownloadCallback implementation
     override fun onDownloadFailed(modelId: String, e: Exception) {
         progressDispatchTrackers.remove(modelId)
+        android.util.Log.e(TAG, "onDownloadFailed: modelId=$modelId, exception=${e.javaClass.name}: ${e.message}", e)
         val info = getOrCreateInfo(modelId)
         info.downloadState = DownloadState.FAILED
         info.downlodaState = DownloadState.FAILED
@@ -414,6 +458,7 @@ class ModelDownloadManager(context: Context) : ModelRepoDownloader.ModelRepoDown
     }
 
     companion object {
+        private const val TAG = "ModelDownloadManager"
         const val REQUEST_CODE_POST_NOTIFICATIONS = 1001  // Stub constant for foreground service notifications
         private const val PERSIST_INTERVAL_MS = 1000L
         private const val PERSIST_MIN_DELTA_BYTES = 1024L * 1024L

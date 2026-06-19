@@ -5,7 +5,11 @@ package com.alibaba.mnnllm.android.main
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
 import android.util.Log
 import android.util.TypedValue
 import android.view.Menu
@@ -41,6 +45,7 @@ import com.alibaba.mnnllm.android.modelmarket.ModelMarketFragment
 import com.alibaba.mnnllm.android.modelmarket.ModelRepository
 import com.alibaba.mnnllm.android.update.UpdateChecker
 import com.alibaba.mnnllm.android.utils.AnalyticsTracker
+import com.alibaba.mnnllm.android.utils.AppLogger
 import com.alibaba.mnnllm.android.utils.CrashUtil
 import com.alibaba.mnnllm.android.utils.GithubUtils
 import com.alibaba.mnnllm.android.utils.PreferenceUtils
@@ -401,6 +406,8 @@ class MainActivity : AppCompatActivity(), MainFragmentManager.FragmentLifecycleL
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        checkStoragePermission()
+        initStoragePath()
         
         // 初始化下载源设置，同步到 ModelSources
         val provider = MainSettings.getDownloadProvider(this)
@@ -598,7 +605,41 @@ class MainActivity : AppCompatActivity(), MainFragmentManager.FragmentLifecycleL
         
         dialog.show(supportFragmentManager, PrivacyPolicyDialogFragment.TAG)
     }
-    
+
+    private fun initStoragePath() {
+        val path = MainSettings.getModelStoragePath(this)
+        val defaultPath = filesDir.absolutePath + "/.mnnmodels"
+        if (path != defaultPath) {
+            try {
+                ModelDownloadManager.getInstance(this).updateCacheDir(path)
+                AppLogger.i(TAG, "Storage path initialized to: $path")
+            } catch (e: Exception) {
+                AppLogger.e(TAG, "Failed to initialize storage path: ${e.message}")
+            }
+        } else {
+            AppLogger.i(TAG, "Using default storage path: $defaultPath")
+        }
+    }
+
+    private fun checkStoragePermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (!Environment.isExternalStorageManager()) {
+                AppLogger.w(TAG, "MANAGE_EXTERNAL_STORAGE not granted, requesting...")
+                try {
+                    val intent = Intent(
+                        Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                        Uri.parse("package:$packageName")
+                    )
+                    startActivity(intent)
+                } catch (e: Exception) {
+                    AppLogger.e(TAG, "Failed to open storage permission settings: ${e.message}")
+                }
+            } else {
+                AppLogger.i(TAG, "MANAGE_EXTERNAL_STORAGE granted")
+            }
+        }
+    }
+
     companion object {
         const val TAG: String = "MainActivity"
         const val EXTRA_SELECT_TAB = "com.alibaba.mnnllm.android.select_tab"

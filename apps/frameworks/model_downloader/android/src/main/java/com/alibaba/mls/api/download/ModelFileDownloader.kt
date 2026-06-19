@@ -27,9 +27,23 @@ class ModelFileDownloader {
         fileDownloadTask: FileDownloadTask,
         fileDownloadListener: FileDownloadListener
     ) {
-        Log.d(TAG, "downloadFile inner")
+        Log.i(TAG, "downloadFile: relativePath=${fileDownloadTask.relativePath}, " +
+                "blobPath=${fileDownloadTask.blobPath}, pointerPath=${fileDownloadTask.pointerPath}, " +
+                "downloadedSize=${fileDownloadTask.downloadedSize}")
         fileDownloadTask.pointerPath!!.parentFile?.mkdirs()
         fileDownloadTask.blobPath!!.parentFile?.mkdirs()
+        
+        // Verify directories were created
+        if (!fileDownloadTask.pointerPath!!.parentFile?.exists()!!) {
+            val msg = "Failed to create pointer parent dir: ${fileDownloadTask.pointerPath!!.parentFile}"
+            Log.e(TAG, msg)
+            throw FileDownloadException(msg)
+        }
+        if (!fileDownloadTask.blobPath!!.parentFile?.exists()!!) {
+            val msg = "Failed to create blob parent dir: ${fileDownloadTask.blobPath!!.parentFile}"
+            Log.e(TAG, msg)
+            throw FileDownloadException(msg)
+        }
 
         if (fileDownloadTask.pointerPath!!.exists()) {
             Log.d(TAG, "DownloadFile " + fileDownloadTask.relativePath + " already exists")
@@ -57,10 +71,15 @@ class ModelFileDownloader {
                 hfFileMetadata.size,
                 fileDownloadTask.relativePath, fileDownloadListener
             )
-            createSymlink(
-                fileDownloadTask.blobPath!!.toPath(),
-                fileDownloadTask.pointerPath!!.toPath()
-            )
+            // Flat mode: blobPath == pointerPath means the file was downloaded
+            // directly into its final location (no blobs/symlink structure).
+            // Skip createSymlink to avoid deleting the just-downloaded file.
+            if (fileDownloadTask.blobPath!!.absolutePath != fileDownloadTask.pointerPath!!.absolutePath) {
+                createSymlink(
+                    fileDownloadTask.blobPath!!.toPath(),
+                    fileDownloadTask.pointerPath!!.toPath()
+                )
+            }
         }
     }
 
@@ -98,22 +117,24 @@ class ModelFileDownloader {
         val request: Request = requestBuilder.build()
         try {
             client.newCall(request).execute().use { response ->
-                Log.d(TAG, "response code: " + response.code)
+                Log.i(TAG, "downloadToTmpAndMove: header response code=${response.code}")
                 for (header in response.headers.names()) {
-                    Log.d(
-                        TAG,
-                        "downloadToTmpAndMove response header: $header: " + response.header(
-                            header
-                        )
-                    )
+                    Log.d(TAG, "downloadToTmpAndMove response header: $header: ${response.header(header)}")
                 }
                 // Handle all redirect status codes (301, 302, 303, 307, 308)
                 if (response.code in 301..308) {
-                    theUrlToDownload = response.header("Location")!!
+                    val location = response.header("Location")
+                    if (location.isNullOrEmpty()) {
+                        Log.e(TAG, "downloadToTmpAndMove: redirect ${response.code} but no Location header")
+                        throw FileDownloadException("Redirect ${response.code} without Location header")
+                    }
+                    theUrlToDownload = location
+                    Log.i(TAG, "downloadToTmpAndMove: redirected to $theUrlToDownload")
                 }
             }
         } catch (e: IOException) {
-            throw FileDownloadException("get header error" + e.message)
+            Log.e(TAG, "downloadToTmpAndMove: IOException getting headers: ${e.message}", e)
+            throw FileDownloadException("get header error: ${e.message}")
         }
         Log.d(
             TAG,

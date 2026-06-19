@@ -11,6 +11,7 @@ import com.alibaba.mls.api.download.DownloadFileUtils.createSymlink
 import com.alibaba.mls.api.download.DownloadFileUtils.deleteDirectoryRecursively
 import com.alibaba.mls.api.download.DownloadFileUtils.getLastFileName
 import com.alibaba.mls.api.download.DownloadFileUtils.getPointerPathParent
+import com.alibaba.mls.api.download.DownloadFileUtils.isSymlinkSupported
 import com.alibaba.mls.api.download.DownloadFileUtils.repoFolderName
 import com.alibaba.mls.api.download.DownloadPausedException
 import com.alibaba.mls.api.download.FileDownloadTask
@@ -78,8 +79,11 @@ class HfModelDownloader(override var callback: ModelRepoDownloadCallback?,
         return withContext(DownloadCoroutineManager.downloadDispatcher) {
             runCatching {
                 val hfModelId = hfModelId(modelId)
+                val host = getHfApiClient().host
+                Log.i(TAG, "fetchRepoInfo: modelId=$modelId, hfModelId=$hfModelId, host=$host")
                 // Add Authorization header if token is available (future improvement)
                 val response = getHfApiClient().getRepoTree(hfModelId, "main").execute()
+                Log.i(TAG, "fetchRepoInfo: response code=${response?.code()}, isSuccessful=${response?.isSuccessful}")
                 if (response?.isSuccessful == true && response.body() != null) {
                     val treeItems: List<HfTreeItem> = response.body()!!
                     // Build HfRepoInfo from tree items
@@ -120,10 +124,11 @@ class HfModelDownloader(override var callback: ModelRepoDownloadCallback?,
                     } else {
                         "API response was null or empty"
                     }
+                    Log.e(TAG, "fetchRepoInfo failed for $modelId: $errorMsg")
                     throw FileDownloadException("Failed to fetch repo info for $modelId: $errorMsg")
                 }
             }.getOrElse { exception ->
-                Log.e(TAG, "Failed to fetch repo info for $modelId", exception)
+                Log.e(TAG, "fetchRepoInfo exception for $modelId: ${exception.javaClass.name}: ${exception.message}", exception)
                 throw FileDownloadException("Failed to fetch repo info for $modelId: ${exception.message}")
             }
         }
@@ -142,13 +147,20 @@ class HfModelDownloader(override var callback: ModelRepoDownloadCallback?,
     }
 
     override fun download(modelId: String) {
+        Log.d(TAG, "download: modelId=$modelId, cacheRootPath=$cacheRootPath")
         DownloadCoroutineManager.launchDownload {
             try {
                 callback?.onDownloadPending(modelId)
+                Log.d(TAG, "download: fetching repo info for $modelId")
                 val repoInfo = fetchRepoInfo(modelId)
+                Log.d(TAG, "download: repo info fetched, siblings=${repoInfo.getSiblings().size}")
                 downloadHfRepo(repoInfo)
             } catch (e: FileDownloadException) {
+                Log.e(TAG, "download failed for $modelId: ${e.message}", e)
                 callback?.onDownloadFailed(modelId, e)
+            } catch (e: Exception) {
+                Log.e(TAG, "download unexpected error for $modelId: ${e.message}", e)
+                callback?.onDownloadFailed(modelId, FileDownloadException("Unexpected error: ${e.message}"))
             }
         }
     }
@@ -207,10 +219,16 @@ class HfModelDownloader(override var callback: ModelRepoDownloadCallback?,
 
     private fun downloadHfRepoInner(hfRepoInfo: HfRepoInfo) {
         val folderLinkFile = File(cacheRootPath, getLastFileName(hfRepoInfo.modelId!!))
+        Log.i(TAG, "downloadHfRepoInner: modelId=${hfRepoInfo.modelId}, cacheRootPath=$cacheRootPath, " +
+                "folderLinkFile=${folderLinkFile.absolutePath}, exists=${folderLinkFile.exists()}")
         if (folderLinkFile.exists()) {
+            Log.d(TAG, "downloadHfRepoInner: already downloaded, calling onDownloadFileFinished")
             callback?.onDownloadFileFinished(hfRepoInfo.modelId!!, folderLinkFile.absolutePath)
             return
         }
+        // Detect symlink support (external storage FUSE does not support symlinks)
+        val flatMode = !isSymlinkSupported(cacheRootPath)
+        Log.i(TAG, "downloadHfRepoInner: flatMode=$flatMode (symlinkSupported=${!flatMode})")
         val modelDownloader = ModelFileDownloader()
         Log.d(TAG, "Repo SHA: " + hfRepoInfo.sha)
 
@@ -219,6 +237,25 @@ class HfModelDownloader(override var callback: ModelRepoDownloadCallback?,
 
         val repoFolderName = repoFolderName(hfRepoInfo.modelId, "model")
         val storageFolder = File(cacheRootPath, repoFolderName)
+        // Flat mode migration: clean up legacy blobs/ + stale symlinks from failed
+        // legacy-mode downloads on FUSE. See MsModelDownloader for full rationale.
+        if (flatMode) {
+            val legacyBlobsDir = File(storageFolder, "blobs")
+            val flatSnapshotsDir = File(storageFolder, "snapshots/${hfRepoInfo.sha}")
+            val hasFlatFiles = flatSnapshotsDir.exists() &&
+                flatSnapshotsDir.listFiles()?.any { it.isFile } == true
+            if (legacyBlobsDir.exists() && !hasFlatFiles) {
+                Log.i(TAG, "downloadHfRepoInner flatMode: cleaning legacy blobs dir " +
+                        "(no flat files yet): ${legacyBlobsDir.absolutePath}")
+                deleteDirectoryRecursively(legacyBlobsDir)
+                val legacySnapshotsDir = File(storageFolder, "snapshots")
+                if (legacySnapshotsDir.exists()) {
+                    Log.i(TAG, "downloadHfRepoInner flatMode: cleaning legacy snapshots dir: " +
+                            legacySnapshotsDir.absolutePath)
+                    deleteDirectoryRecursively(legacySnapshotsDir)
+                }
+            }
+        }
         val parentPointerPath = getPointerPathParent(
             storageFolder,
             hfRepoInfo.sha!!
@@ -227,7 +264,7 @@ class HfModelDownloader(override var callback: ModelRepoDownloadCallback?,
         val totalAndDownloadSize = LongArray(2)
         try {
             downloadTaskList =
-                collectTaskList(storageFolder, parentPointerPath, hfRepoInfo, totalAndDownloadSize)
+                collectTaskList(storageFolder, parentPointerPath, hfRepoInfo, totalAndDownloadSize, flatMode)
         } catch (e: FileDownloadException) {
             callback?.onDownloadFailed(hfRepoInfo.modelId!!, e)
             return
@@ -261,9 +298,14 @@ class HfModelDownloader(override var callback: ModelRepoDownloadCallback?,
             return
         }
         if (!hasError) {
-            val folderLinkPath = folderLinkFile.absolutePath
-            createSymlink(parentPointerPath.toString(), folderLinkPath)
-            callback?.onDownloadFileFinished(hfRepoInfo.modelId!!, folderLinkPath)
+            if (flatMode) {
+                Log.d(TAG, "downloadHfRepoInner flat mode: using snapshots dir as model path")
+                callback?.onDownloadFileFinished(hfRepoInfo.modelId!!, parentPointerPath.absolutePath)
+            } else {
+                val folderLinkPath = folderLinkFile.absolutePath
+                createSymlink(parentPointerPath.toString(), folderLinkPath)
+                callback?.onDownloadFileFinished(hfRepoInfo.modelId!!, folderLinkPath)
+            }
         } else {
             Log.e(
                 TAG,
@@ -277,7 +319,8 @@ class HfModelDownloader(override var callback: ModelRepoDownloadCallback?,
         storageFolder: File,
         parentPointerPath: File,
         hfRepoInfo: HfRepoInfo,
-        totalAndDownloadSize: LongArray
+        totalAndDownloadSize: LongArray,
+        flatMode: Boolean = false
     ): List<FileDownloadTask> {
         var metaData: HfFileMetadata
         val fileDownloadTasks: MutableList<FileDownloadTask> = ArrayList()
@@ -289,10 +332,17 @@ class HfModelDownloader(override var callback: ModelRepoDownloadCallback?,
             fileDownloadTask.relativePath = subFile.rfilename
             fileDownloadTask.fileMetadata = metaData
             fileDownloadTask.etag = metaData.etag
-            fileDownloadTask.blobPath = File(storageFolder, "blobs/" + metaData.etag)
-            fileDownloadTask.blobPathIncomplete =
-                File(storageFolder, "blobs/" + metaData.etag + ".incomplete")
             fileDownloadTask.pointerPath = File(parentPointerPath, subFile.rfilename)
+            if (flatMode) {
+                // Flat mode: download directly into pointerPath, no blobs/symlink layer
+                fileDownloadTask.blobPath = fileDownloadTask.pointerPath
+                fileDownloadTask.blobPathIncomplete =
+                    File(parentPointerPath, subFile.rfilename + ".incomplete")
+            } else {
+                fileDownloadTask.blobPath = File(storageFolder, "blobs/" + metaData.etag)
+                fileDownloadTask.blobPathIncomplete =
+                    File(storageFolder, "blobs/" + metaData.etag + ".incomplete")
+            }
             fileDownloadTask.downloadedSize =
                 if (fileDownloadTask.blobPath!!.exists()) fileDownloadTask.blobPath!!.length() else (if (fileDownloadTask.blobPathIncomplete!!.exists()) fileDownloadTask.blobPathIncomplete!!.length() else 0)
             totalAndDownloadSize[0] += metaData.size
@@ -303,7 +353,16 @@ class HfModelDownloader(override var callback: ModelRepoDownloadCallback?,
     }
 
     override fun getDownloadPath(modelId: String): File {
-        return getModelPath(cacheRootPath, modelId)
+        // Legacy: top-level symlink (internal storage / ext4)
+        val legacyLink = File(cacheRootPath, getLastFileName(modelId))
+        if (legacyLink.exists()) return legacyLink
+        // Flat mode (external storage / FUSE): scan snapshots/ for a real directory
+        val repoFolderName = repoFolderName(modelId, "model")
+        val snapshotsDir = File(cacheRootPath, "$repoFolderName/snapshots")
+        if (snapshotsDir.exists()) {
+            snapshotsDir.listFiles()?.firstOrNull { it.isDirectory }?.let { return it }
+        }
+        return legacyLink
     }
 
     @Throws(FileDownloadException::class)
