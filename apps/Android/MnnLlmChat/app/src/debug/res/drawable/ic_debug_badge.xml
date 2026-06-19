@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug badge: orange rectangle with "DEV" text -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FF5722"
+        android:pathData="M0,0h24v24H0z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M4,17h2v-3h3V7H4v10z M6,9h3v3H6V9z M11,17h2v-1.8l2.8,1.8h2.4l-3.5-2.1L17.8,7H15.3l-2.3,3l2.3,3.2V7h-2V17z M19,17h2v-3h3V7h-5v10z M21,9h3v3h-3V9z" />
+</vector>

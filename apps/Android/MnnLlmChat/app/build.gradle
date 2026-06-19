@@ -119,6 +119,9 @@ android {
             }
         }
         buildTypes {
+            debug {
+                applicationIdSuffix ".debug"
+            }
             release {
                 if (System.getenv("KEYSTORE_FILE")) {
                     signingConfig signingConfigs.release
