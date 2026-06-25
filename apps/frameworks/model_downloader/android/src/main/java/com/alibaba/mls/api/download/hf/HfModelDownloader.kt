@@ -339,7 +339,7 @@ class HfModelDownloader(override var callback: ModelRepoDownloadCallback?,
                 fileDownloadTask.blobPathIncomplete =
                     File(parentPointerPath, subFile.rfilename + ".incomplete")
             } else {
-                fileDownloadTask.blobPath = File(storageFolder, "blobs/" + metaData.etag)
+                fileDownloadTask.blobPath = File(storageFolder, "blobs/" + metaData.etag!!)
                 fileDownloadTask.blobPathIncomplete =
                     File(storageFolder, "blobs/" + metaData.etag + ".incomplete")
             }

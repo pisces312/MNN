@@ -15,7 +15,7 @@ import java.util.concurrent.TimeUnit
 
 class MlApiClient {
     private val host = "modelers.cn"
-    private var okHttpClient: OkHttpClient? = null
+    private lateinit var okHttpClient: OkHttpClient
 
     val apiService: MlApiService
 
@@ -28,15 +28,16 @@ class MlApiClient {
         apiService = retrofit.create(MlApiService::class.java)
     }
 
-    private fun createOkHttpClient(): OkHttpClient? {
+    private fun createOkHttpClient(): OkHttpClient {
         val logging = HttpLoggingInterceptor()
         logging.setLevel(HttpLoggingInterceptor.Level.BODY)
         val builder: OkHttpClient.Builder = OkHttpClient.Builder()
         builder.connectTimeout(30, TimeUnit.SECONDS)
         builder.addInterceptor(logging)
         builder.readTimeout(30, TimeUnit.SECONDS)
-        okHttpClient = builder.build()
-        return okHttpClient
+        val client = builder.build()
+        okHttpClient = client
+        return client
     }
 
     interface MlApiService {

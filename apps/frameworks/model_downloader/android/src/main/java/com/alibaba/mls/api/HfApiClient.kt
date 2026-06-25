@@ -14,7 +14,7 @@ import java.util.concurrent.TimeUnit
  */
 class HfApiClient(val host: String) {
     private val apiService: HfApiService
-    var okHttpClient: OkHttpClient? = null
+    lateinit var okHttpClient: OkHttpClient
         private set
 
     init {
@@ -27,12 +27,13 @@ class HfApiClient(val host: String) {
         apiService = retrofit.create(HfApiService::class.java)
     }
 
-    private fun createOkHttpClient(): OkHttpClient? {
+    private fun createOkHttpClient(): OkHttpClient {
         val builder: OkHttpClient.Builder = OkHttpClient.Builder()
         builder.connectTimeout(30, TimeUnit.SECONDS)
         builder.readTimeout(30, TimeUnit.SECONDS)
-        okHttpClient = builder.build()
-        return okHttpClient
+        val client = builder.build()
+        okHttpClient = client
+        return client
     }
 
     // Get repo file tree

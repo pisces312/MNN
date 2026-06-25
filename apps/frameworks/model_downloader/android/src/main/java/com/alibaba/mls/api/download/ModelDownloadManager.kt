@@ -11,13 +11,49 @@ import com.alibaba.mls.api.download.DownloadPersistentData
 import java.io.File
 
 /**
+ * Resolver interface for custom cache directory path.
+ * App layer injects an implementation via [ModelDownloadManager.setCacheDirResolver]
+ * before the first `getInstance()` call, so the singleton is created with the
+ * correct path from the start.
+ *
+ * # Why a callback-injection approach?
+ *
+ * This module (`model_downloader`) is a framework-layer library that must NOT
+ * depend on the app layer. The storage path preference (MainSettings) lives in
+ * the app layer, so the framework cannot read it directly. Alternatives
+ * considered:
+ *
+ * 1. **Direct call to MainSettings inside getInstance** — rejected: would create
+ *    a circular dependency (app → framework → app). `model_downloader`'s
+ *    `build.gradle` has no dependency on the app module and cannot reference
+ *    `MainSettings`.
+ *
+ * 2. **Add a `cacheDir` parameter to `getInstance(context, cacheDir)`** —
+ *    rejected: `getInstance(context)` has 15+ call sites across the codebase
+ *    (ChatRouter, ModelListPresenter, VoiceModelMarketViewModel, etc.). Most
+ *    call sites only have a `Context` and don't know the storage path.
+ *    Forcing every caller to pass `cacheDir` is invasive and error-prone; using
+ *    a default value for `cacheDir` reintroduces the original problem.
+ *
+ * 3. **Expose `getModelStoragePath()` on a custom Application/Context** —
+ *    rejected: every call site would need to cast `Context` to the custom type,
+ *    adding brittleness and coupling.
+ *
+ * The callback-injection approach requires only ONE line in `Application.onCreate()`
+ * and leaves all existing `getInstance(context)` call sites untouched.
+ */
+fun interface CacheDirResolver {
+    fun resolveCacheDir(context: Context): String
+}
+
+/**
  * Minimal ModelDownloadManager for framework
  * Apps can extend or wrap this class for additional functionality
  */
 class ModelDownloadManager(context: Context) : ModelRepoDownloader.ModelRepoDownloadCallback {
 
     @Volatile
-    var cacheDir: String = context.filesDir.absolutePath + "/.mnnmodels"
+    var cacheDir: String = resolveCacheDir(context)
         private set
     private val hfDownloader: HfModelDownloader
     private val msDownloader: MsModelDownloader
@@ -467,6 +503,33 @@ class ModelDownloadManager(context: Context) : ModelRepoDownloader.ModelRepoDown
 
         @Volatile
         private var instance: ModelDownloadManager? = null
+
+        @Volatile
+        private var cacheDirResolver: CacheDirResolver? = null
+
+        /**
+         * Set a custom cache directory resolver.
+         *
+ * Must be called before the first `getInstance()` call so the singleton
+ * is created with the correct path. Typically injected in
+ * `Application.onCreate()` before any other initialization.
+ *
+ * If not set, defaults to `filesDir/.mnnmodels`.
+         */
+        @JvmStatic
+        fun setCacheDirResolver(resolver: CacheDirResolver?) {
+            cacheDirResolver = resolver
+        }
+
+        /**
+         * Resolve the cache directory using the injected [CacheDirResolver],
+         * falling back to `filesDir/.mnnmodels` if no resolver is set.
+         * Called during construction so the path is correct from the start.
+         */
+        private fun resolveCacheDir(context: Context): String {
+            return cacheDirResolver?.resolveCacheDir(context)
+                ?: context.filesDir.absolutePath + "/.mnnmodels"
+        }
 
         @JvmStatic
         fun getInstance(context: Context): ModelDownloadManager {

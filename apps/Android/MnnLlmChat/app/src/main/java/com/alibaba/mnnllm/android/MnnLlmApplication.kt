@@ -21,6 +21,13 @@ class MnnLlmApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         ApplicationProvider.set(this)
+
+        // Inject cache dir resolver before any ModelDownloadManager.getInstance() call
+        // so the singleton is created with the correct storage path from the start.
+        ModelDownloadManager.setCacheDirResolver { context ->
+            com.alibaba.mnnllm.android.mainsettings.MainSettings.getModelStoragePath(context)
+        }
+
         UpdateChecker.registerDownloadReceiver(applicationContext)
         CrashUtil.init(this)
         instance = this

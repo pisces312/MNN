@@ -24,7 +24,7 @@ object DownloadFileUtils {
         val parts: MutableList<String> = ArrayList()
         parts.add(repoType + "s") // e.g., "models"
         for (part in repoParts) {
-            if (part != null && !part.isEmpty()) {
+            if (part.isNotEmpty()) {
                 parts.add(part)
             }
         }
