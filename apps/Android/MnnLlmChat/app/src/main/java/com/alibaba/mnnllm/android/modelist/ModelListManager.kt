@@ -112,7 +112,8 @@ object ModelListManager {
         MODEL_UNPINNED,
         MANUAL_REFRESH,
         MARKET_DATA_UPDATED,
-        INITIALIZATION
+        INITIALIZATION,
+        STORAGE_PATH_CHANGED
     }
 
     sealed class RefreshEvent {

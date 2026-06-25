@@ -86,7 +86,16 @@ class UpdateChecker(private val context: Context) {
         if (BuildConfig.IS_GOOGLE_PLAY_BUILD) {
             return
         }
-        
+
+        // Fork build: skip upstream update check entirely.
+        // Fork releases are distributed via GitHub Release, not modelScope.
+        // UpdateChecker's network/dl/install plumbing is preserved for upstream sync,
+        // but never runs in fork builds.
+        if (BuildConfig.IS_FORK_BUILD) {
+            Log.i(TAG, "Fork build, skip upstream update check")
+            return
+        }
+
         if (waitingForInstallPermission && (waitingDownloadId > 0 || waitingFileUri != null)) {
             installApk(context, waitingDownloadId, waitingFileUri)
             waitingForInstallPermission = false
@@ -196,6 +205,10 @@ class UpdateChecker(private val context: Context) {
     }
 
     private fun isNewerVersion(latest: String, current: String): Boolean {
+        // Parse leading digits of a version segment; non-numeric suffix (e.g. "3-pisces")
+        // is truncated to its numeric prefix ("3"). Empty or non-digit segments → 0.
+        fun parseSeg(s: String): Int = s.takeWhile { it.isDigit() }.toIntOrNull() ?: 0
+
         val latestParts =
             latest.split("\\.".toRegex()).dropLastWhile { it.isEmpty() }.toTypedArray()
         val currentParts =
@@ -203,8 +216,8 @@ class UpdateChecker(private val context: Context) {
         val length =
             max(latestParts.size.toDouble(), currentParts.size.toDouble()).toInt()
         for (i in 0 until length) {
-            val latestNum = if (i < latestParts.size) latestParts[i].toInt() else 0
-            val currentNum = if (i < currentParts.size) currentParts[i].toInt() else 0
+            val latestNum = if (i < latestParts.size) parseSeg(latestParts[i]) else 0
+            val currentNum = if (i < currentParts.size) parseSeg(currentParts[i]) else 0
             if (latestNum > currentNum) {
                 return true
             } else if (latestNum < currentNum) {
@@ -212,6 +225,22 @@ class UpdateChecker(private val context: Context) {
             }
         }
         return false
+    }
+
+    /**
+     * Detect fork build by version name.
+     * Fork versionName follows: MAJOR.MINOR.PATCH.FORK_INC (4 segments),
+     * e.g. "0.8.3.1" = official 0.8.3 + fork #1.
+     * Upstream uses 3 segments (e.g. "0.8.3"), so segment count distinguishes fork.
+     *
+     * NOTE: Currently unused — fork builds short-circuit on IS_FORK_BUILD flag
+     * above before reaching version parsing. Kept for documentation of the
+     * version scheme and potential future use (e.g. migrating from flag to
+     * version-based detection).
+     */
+    @Suppress("unused")
+    private fun isForkVersion(version: String): Boolean {
+        return version.split(".").size >= 4
     }
 
     private fun showUpdateDialog(
@@ -332,7 +361,11 @@ class UpdateChecker(private val context: Context) {
             if (BuildConfig.IS_GOOGLE_PLAY_BUILD) {
                 return
             }
-            
+            // Fork build: no in-app update flow, skip receiver registration
+            if (BuildConfig.IS_FORK_BUILD) {
+                return
+            }
+
             val downloadCompletedReceiver = DownloadReceiver()
             val filter = IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {

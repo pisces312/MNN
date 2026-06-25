@@ -9,13 +9,68 @@
 | 组件 | 版本 |
 |------|------|
 | MNN 引擎 | **3.6.0** |
-| App versionName | 0.8.3 (versionCode 830) |
+| App versionName | 0.8.3.1 (fork of upstream 0.8.3, fork #1) |
+| App versionCode | 25062501 (日期式 YYMMDDNN) |
 | Gradle | 8.9 |
 | AGP | 8.7.3 |
 | Kotlin | 2.1.21 |
 | NDK | 27.2.12479018 |
 | compileSdk / targetSdk | 35 |
 | minSdk | 26 |
+
+## 版本号规则（fork 专用）
+
+本仓库是 MNN 官方 `apps/Android/MnnLlmChat` 的 fork，版本号需与官方结构隔离。
+
+### versionName
+
+格式：`MAJOR.MINOR.PATCH.FORK_INC`
+
+- `MAJOR.MINOR.PATCH` 对齐 MNN 上游版本（如上游 0.8.3）
+- 第 4 段 `FORK_INC` 是 fork 增量号，从 1 开始，每次 fork 发布 +1
+- 上游版本升级时 `FORK_INC` 归零
+- 全部纯数字，禁止任何非数字字符（避免 `UpdateChecker.isNewerVersion()` 解析崩溃）
+- fork 版本号永远是 4 段，上游最多 3 段，段数即可区分
+
+示例：
+| 上游版本 | fork 序号 | versionName |
+|---|---|---|
+| 0.8.3 | 1 | 0.8.3.1 |
+| 0.8.3 | 2 | 0.8.3.2 |
+| 0.8.4 | 1 | 0.8.4.1 |
+| 0.9.0 | 1 | 0.9.0.1 |
+| 1.0.0 | 1 | 1.0.0.1 |
+
+**区分机制**：fork 与上游的区分不依赖 versionName 本身，而是通过：
+1. `BuildConfig.IS_FORK_BUILD = true`（编译期 flag）
+2. `BuildConfig.FORK_TAG = "pisces"`（fork 代号）
+3. versionName 段数（fork 4 段 vs 上游 3 段，自然区分）
+
+### versionCode
+
+格式：`YYMMDDNN`
+
+- `YYMMDD` 发布日期（2025-06-25 → 250625）
+- `NN` 当天序号（01-99）
+- 天然单调递增，无需维护计数器
+
+示例：`25062501` = 2025-06-25 第 1 次发布
+
+### Fork 标识
+
+`pisces` 作为 fork 代号，**不进入 versionName / versionCode**，只出现在：
+- APK 文件名：`MnnLlmChat-v0.8.3.1-pisces-standard-signed.apk`
+- `BuildConfig.FORK_TAG = "pisces"`（about 页 / 日志可读）
+- git 分支名：`feature/pisces-xxx`
+- GitHub Release 标题
+
+### UpdateChecker 行为
+
+fork 版本（`IS_FORK_BUILD = true`）启动时：
+- `UpdateChecker.checkForUpdates()` 直接 return，不发任何网络请求
+- `UpdateChecker.registerDownloadReceiver()` 不注册 DownloadReceiver
+- 设置页"检查更新"按钮不可点击，仅显示版本号
+- fork 自身的更新通过 GitHub Release 分发，不走 app 内更新机制
 
 ## 构建步骤
 

@@ -423,8 +423,12 @@ class MainActivity : AppCompatActivity(), MainFragmentManager.FragmentLifecycleL
         drawerLayout = findViewById(R.id.drawer_layout)
         historyDrawerView = findViewById(R.id.nav_view)
         expandableFabLayout = findViewById(R.id.expandable_fab_layout)
-        updateChecker = UpdateChecker(this)
-        updateChecker!!.checkForUpdates(this, false)
+        // Fork build: skip UpdateChecker instantiation entirely (no in-app updates).
+        // Upstream init kept for sync friendliness; guarded so fork does nothing.
+        if (!com.alibaba.mnnllm.android.BuildConfig.IS_FORK_BUILD) {
+            updateChecker = UpdateChecker(this)
+            updateChecker!!.checkForUpdates(this, false)
+        }
         mainFragmentManager = MainFragmentManager(this, R.id.main_fragment_container, bottomNav, this, this)
         mainFragmentManager.initialize(savedInstanceState)
         bottomNav.post { setDrawerEnabled(bottomNav.getSelectedTab() != BottomTabBar.Tab.BENCHMARK) }
@@ -607,17 +611,20 @@ class MainActivity : AppCompatActivity(), MainFragmentManager.FragmentLifecycleL
     }
 
     private fun initStoragePath() {
+        // Resolver is injected in Application.onCreate(), so the singleton already uses
+        // the correct path at construction time. Here we only handle the case where the
+        // user changed the storage path at runtime (singleton already exists with old path).
         val path = MainSettings.getModelStoragePath(this)
-        val defaultPath = filesDir.absolutePath + "/.mnnmodels"
-        if (path != defaultPath) {
+        val currentCacheDir = ModelDownloadManager.getInstance(this).cacheDir
+        if (path != currentCacheDir) {
             try {
                 ModelDownloadManager.getInstance(this).updateCacheDir(path)
-                AppLogger.i(TAG, "Storage path initialized to: $path")
+                AppLogger.i(TAG, "Storage path updated to: $path (was: $currentCacheDir)")
             } catch (e: Exception) {
-                AppLogger.e(TAG, "Failed to initialize storage path: ${e.message}")
+                AppLogger.e(TAG, "Failed to update storage path: ${e.message}")
             }
         } else {
-            AppLogger.i(TAG, "Using default storage path: $defaultPath")
+            AppLogger.i(TAG, "Storage path unchanged: $currentCacheDir")
         }
     }
 

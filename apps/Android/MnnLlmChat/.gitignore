@@ -1,6 +1,8 @@
 *.jks
 toc.pb
 *.apks
+*.idsig
+*.apk
 .cursorrules
 release_outputs/
 .kotlin/

@@ -30,6 +30,7 @@ import com.alibaba.mnnllm.android.MnnLlmApplication
 import com.alibaba.mnnllm.android.R
 import com.alibaba.mnnllm.android.databinding.FragmentMainSettingsBinding
 import com.alibaba.mnnllm.android.debug.DebugActivity
+import com.alibaba.mnnllm.android.modelist.ModelListManager
 import com.alibaba.mnnllm.android.modelmarket.ModelRepository
 import com.alibaba.mnnllm.android.privacy.PrivacyPolicyManager
 import com.alibaba.mnnllm.android.update.UpdateChecker
@@ -235,6 +236,7 @@ class MainSettingsFragment : Fragment() {
             binding.tvStoragePath.text = defaultPath
             AppLogger.i(TAG, "Storage path restored to default: $defaultPath")
             Toast.makeText(context, "Restored to default", Toast.LENGTH_SHORT).show()
+            triggerModelListRefresh()
         } catch (e: Exception) {
             AppLogger.e(TAG, "Failed to restore default path: ${e.message}")
             Toast.makeText(context, "Failed: ${e.message}", Toast.LENGTH_LONG).show()
@@ -249,9 +251,27 @@ class MainSettingsFragment : Fragment() {
             binding.tvStoragePath.text = newPath
             AppLogger.i(TAG, "Storage path updated to: $newPath")
             Toast.makeText(context, "Model storage path updated", Toast.LENGTH_SHORT).show()
+            triggerModelListRefresh()
         } catch (e: Exception) {
             AppLogger.e(TAG, "Failed to update storage path: ${e.message}")
             Toast.makeText(context, "Failed: ${e.message}\n\nMake sure you have granted 'All files access' permission.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /**
+     * Trigger ModelListManager to rescan the (possibly new) storage directory
+     * and emit updated model list. Runs on IO dispatcher; safe to call from main thread.
+     */
+    private fun triggerModelListRefresh() {
+        viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                ModelListManager.notifyModelListMayChange(
+                    ModelListManager.ChangeReason.STORAGE_PATH_CHANGED
+                )
+                AppLogger.i(TAG, "Model list refresh triggered after storage path change")
+            } catch (e: Exception) {
+                AppLogger.e(TAG, "Failed to refresh model list after path change: ${e.message}")
+            }
         }
     }
 
@@ -406,7 +426,9 @@ class MainSettingsFragment : Fragment() {
     }
 
     private fun setupUpdateAndVersion() {
-        if (com.alibaba.mnnllm.android.BuildConfig.IS_GOOGLE_PLAY_BUILD) {
+        // Fork build: no in-app update check, button shows version only
+        if (com.alibaba.mnnllm.android.BuildConfig.IS_GOOGLE_PLAY_BUILD
+            || com.alibaba.mnnllm.android.BuildConfig.IS_FORK_BUILD) {
             binding.btnCheckUpdate.isClickable = false
             binding.btnCheckUpdate.text = getString(R.string.current_version, AppUtils.getAppVersionName(requireContext()))
         } else {
