@@ -40,7 +40,7 @@ preBuild.dependsOn downloadAndUnzipNativeLibs
 android {
     namespace 'com.taobao.meta.avatar'
     compileSdk 35
-    ndkVersion '27.2.12479018'
+    ndkVersion '27.3.13750724'
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17

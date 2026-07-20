@@ -59,7 +59,7 @@ if (project.hasProperty('ADD_BUILTIN') && project.property('ADD_BUILTIN') == 'tr
 android {
     namespace 'com.alibaba.mnnllm.android'
     compileSdk 35
-    ndkVersion "27.0.12077973"
+    ndkVersion "27.3.13750724"
     
     flavorDimensions "store"
     androidResources {
