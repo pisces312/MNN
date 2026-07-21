@@ -11,6 +11,7 @@
 #import "MetalAttentionShader.hpp"
 #import "MetalSoftmaxShader.hpp"
 #import "MetalAttention.hpp"
+#include "core/TensorUtils.hpp"
 
 #if MNN_METAL_ENABLED
 #ifdef MNN_SUPPORT_TRANSFORMER_FUSE
@@ -42,13 +43,18 @@ struct CopyParam {
     int dst_k_offset;
     int dst_v_offset;
     int batch;
+    int value_c4;
     float v_scale;
     float k_scale;
 };
 
-AttentionBufExecution::AttentionBufExecution(Backend* backend, bool outputC4, float attnScale,
+AttentionBufExecution::AttentionBufExecution(Backend* backend, bool kvCache, bool outputC4, float attnScale,
                                              std::shared_ptr<KVQuantParameter> kvQuantParam)
-    : MetalExecution(backend), mOutputC4(outputC4), mAttnScale(attnScale), mKVQuantParameter(kvQuantParam) {
+    : MetalExecution(backend),
+      mKVCache(kvCache),
+      mOutputC4(outputC4),
+      mAttnScale(attnScale),
+      mKVQuantParameter(kvQuantParam) {
     _init();
 }
 void AttentionBufExecution::_init() {
@@ -69,7 +75,7 @@ void AttentionBufExecution::_init() {
     kvconfig.mKvAlignNum = mKvAlignNum;
 
     mKVCacheManager.reset(new MetalKVCacheManager(backend(), kvconfig));
-    mKvInDisk = !kvconfig.mKVCacheDir.empty();
+    mKvInDisk = mKVCache && !kvconfig.mKVCacheDir.empty();
     mKVCacheManager->setKVQuantParameter(mKVQuantParameter);
 }
 
@@ -112,7 +118,7 @@ void AttentionBufExecution::compilerShader(const std::vector<Tensor*>& inputs) {
                 qkKeys.emplace_back("SET_MASK");
             }
         }
-    } else {
+    } else if (mKVCache) {
         qkPrefillKeys.emplace_back("DEFAULT_MASK");
         if (seq_len > 1) {
             qkKeys.emplace_back("DEFAULT_MASK");
@@ -235,6 +241,9 @@ void AttentionBufExecution::compilerShader(const std::vector<Tensor*>& inputs) {
     if (mDecodeQkSoftmax) {
         std::string head_dim_str = std::to_string(mHeadDim);
         std::vector<std::string> keys = {"decode_qk_softmax", ftype, group_str, "HEAD_DIM_" + head_dim_str};
+        if (mKvSeqLen <= 128) {
+            keys.emplace_back("SHORT_KV_128");
+        }
         if (mQuantKey) {
             keys.emplace_back("QUANT_K");
             if (dynamicQuantK) {
@@ -262,6 +271,48 @@ void AttentionBufExecution::compilerShader(const std::vector<Tensor*>& inputs) {
 }
 
 void AttentionBufExecution::handleKVAllocMemory() {
+    constexpr auto allocType = Backend::DYNAMIC_IN_EXECUTION;
+    if (!mKVCache) {
+        mKvSeqLen = mCurrentKvLen;
+        mKvMaxLen = ROUND_UP(mKvSeqLen, mKvAlignNum);
+        mQseqSplitNum = 1;
+
+        int keySize = mKvMaxLen * mBatch * mKvNumHead * mHeadDim;
+        int valueSize = mBatch * mKvNumHead * mHeadDim * mKvMaxLen;
+        if (nullptr == mTempK || mTempK->elementSize() != keySize) {
+            mTempK.reset(Tensor::createDevice<float>({keySize}));
+        }
+        if (nullptr == mTempV || mTempV->elementSize() != valueSize) {
+            mTempV.reset(Tensor::createDevice<float>({valueSize}));
+        }
+
+        int qSeqLenPiece = UP_DIV(mSeqLen, mQseqSplitNum);
+        bool needMalloc = mTempQK->length(0) != mBatch * mNumHead;
+        if (mTempQK->length(1) != qSeqLenPiece * mKvMaxLen) {
+            needMalloc = true;
+        }
+        if (needMalloc) {
+            mTempQK->setLength(0, mBatch * mNumHead);
+            mTempQK->setLength(1, qSeqLenPiece * mKvMaxLen);
+            mTempSoftMax->setLength(0, mBatch * mNumHead);
+            mTempSoftMax->setLength(1, qSeqLenPiece * mKvMaxLen);
+        }
+
+        auto res = backend()->onAcquireBuffer(mTempK.get(), allocType) &&
+                   backend()->onAcquireBuffer(mTempV.get(), allocType) &&
+                   backend()->onAcquireBuffer(mTempQK.get(), allocType) &&
+                   backend()->onAcquireBuffer(mTempSoftMax.get(), allocType);
+        if (!res) {
+            MNN_ERROR("MNN::Metal: OUT_OF_MEMORY when execute attention metal %d\n", res);
+            return;
+        }
+        backend()->onReleaseBuffer(mTempK.get(), allocType);
+        backend()->onReleaseBuffer(mTempV.get(), allocType);
+        backend()->onReleaseBuffer(mTempQK.get(), allocType);
+        backend()->onReleaseBuffer(mTempSoftMax.get(), allocType);
+        return;
+    }
+
     if (nullptr == mMeta || mMeta->previous == mMeta->remove) {
         mKVCacheManager->onClear();
         mKVCacheManager->onAlloc(mMeta, mCurrentKvLen);
@@ -289,7 +340,6 @@ void AttentionBufExecution::handleKVAllocMemory() {
         mTempSoftMax->setLength(1, qSeqLenPiece * mKvMaxLen);
     }
 
-    constexpr auto allocType = Backend::DYNAMIC_IN_EXECUTION;
     auto res = backend()->onAcquireBuffer(mTempQK.get(), allocType) &&
                backend()->onAcquireBuffer(mTempSoftMax.get(), allocType);
     if (!res) {
@@ -330,11 +380,15 @@ ErrorCode AttentionBufExecution::onResize(const std::vector<Tensor*>& inputs, co
     bool dynamicQuantK = (attentionOption % 8 >= 1);
     bool dynamicQuantV = (attentionOption % 8 > 1);
 
-    mQuantValue = !mKvInDisk && ((mKVQuantParameter != nullptr && mKVQuantParameter->vScale != 0.0f) || dynamicQuantV);
-    mQuantKey = !mKvInDisk && ((mKVQuantParameter != nullptr && mKVQuantParameter->kScale != 0.0f) || dynamicQuantK);
-    mKVCacheManager->setKVQuantParameter(mKVQuantParameter);
-    mKVCacheManager->setAttenQuantKeyValue(mQuantKey, mQuantValue);
-    mKVCacheManager->onResize(mKvNumHead, mHeadDim);
+    mQuantValue = mKVCache && !mKvInDisk &&
+                  ((mKVQuantParameter != nullptr && mKVQuantParameter->vScale != 0.0f) || dynamicQuantV);
+    mQuantKey = mKVCache && !mKvInDisk &&
+                ((mKVQuantParameter != nullptr && mKVQuantParameter->kScale != 0.0f) || dynamicQuantK);
+    if (mKVCache) {
+        mKVCacheManager->setKVQuantParameter(mKVQuantParameter);
+        mKVCacheManager->setAttenQuantKeyValue(mQuantKey, mQuantValue);
+        mKVCacheManager->onResize(mKvNumHead, mHeadDim);
+    }
     return NO_ERROR;
 }
 void AttentionBufExecution::onEncode(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs,
@@ -357,9 +411,12 @@ void AttentionBufExecution::onEncode(const std::vector<Tensor*>& inputs, const s
     if (mKvInDisk) {
         tempBufferK = mKVCacheManager->getKeyBuffer();
         tempBufferV = mKVCacheManager->getValueBuffer();
-    } else {
+    } else if (mKVCache) {
         tempTensorK = mKVCacheManager->getKeyTensor();
         tempTensorV = mKVCacheManager->getValueTensor();
+    } else {
+        tempTensorK = mTempK.get();
+        tempTensorV = mTempV.get();
     }
 
     // whether use simdgroup
@@ -377,9 +434,10 @@ void AttentionBufExecution::onEncode(const std::vector<Tensor*>& inputs, const s
     mSftmSimdReduce = supportSimdReduce;
     mQkvSimdReduce = supportSimdReduce && mShortSeq && mHeadDim * mNumHead < mKvSeqLen * 32;
     mQkvSimdMatrix = supportSimdMatrix && mSeqLen >= 16;
-    mCopySimdReduce = supportSimdReduce && mKVCacheManager->useDynamicScaleBuffer();
-    mDecodeQkSoftmax = mShortSeq && mSeqLen <= 8 &&
-                       !mHasMask && !mKvInDisk &&
+    mCopySimdReduce = mKVCache && supportSimdReduce && mKVCacheManager->useDynamicScaleBuffer();
+    bool trivialFloatMask = mHasMask && mIsAddMask && mSeqLen == 1 && inputs[3]->elementSize() == 1;
+    mDecodeQkSoftmax = mKVCache && mShortSeq && mSeqLen <= 8 &&
+                       (!mHasMask || trivialFloatMask) && !mKvInDisk &&
                        group_size == 2 && mHeadDim % 8 == 0 && mKvSeqLen <= 2048;
 
     // start to compile attention shaders
@@ -397,9 +455,12 @@ void AttentionBufExecution::onEncode(const std::vector<Tensor*>& inputs, const s
         // current new kv_len
         copyp->kv_seq_len = key->shape()[1];
         copyp->max_kv_len = mKvMaxLen;
-        copyp->dst_k_offset = mKVCacheManager->kvLength() * copyp->head_count;
-        copyp->dst_v_offset = mKVCacheManager->kvLength();
+        int pastLength = mKVCache ? mKVCacheManager->kvLength() : 0;
+        copyp->dst_k_offset = pastLength * copyp->head_count;
+        copyp->dst_v_offset = pastLength;
         copyp->batch = mBatch;
+        copyp->value_c4 =
+            TensorUtils::getDescribe(value)->dimensionFormat == MNN_DATA_FORMAT_NC4HW4 ? 1 : 0;
         if (mQuantValue && mKVQuantParameter != nullptr) {
             copyp->v_scale = mKVQuantParameter->vScale;
         } else {
@@ -424,13 +485,13 @@ void AttentionBufExecution::onEncode(const std::vector<Tensor*>& inputs, const s
             MetalBackend::setTensor(tempTensorV, encoder, 3);
         }
         [encoder setBuffer:mParamCopy offset:0 atIndex:4];
-        if (mKVCacheManager->getKScaleBuffer() != nil) {
+        if (mKVCache && mKVCacheManager->getKScaleBuffer() != nil) {
             [encoder setBuffer:mKVCacheManager->getKScaleBuffer() offset:0 atIndex:8];
             [encoder setBuffer:mKVCacheManager->getVScaleBuffer() offset:0 atIndex:9];
         }
 
         std::pair<MTLSize, MTLSize> gl;
-        if (mKVCacheManager->getKScaleBuffer() != nil) {
+        if (mKVCache && mKVCacheManager->getKScaleBuffer() != nil) {
             int localSize = mCopySimdReduce ? 32 : 128;
             gl = std::make_pair(MTLSizeMake(1, copy_line, mBatch), MTLSizeMake(localSize, 1, 1));
         } else if (mDecodeQkSoftmax) {
@@ -480,12 +541,12 @@ void AttentionBufExecution::onEncode(const std::vector<Tensor*>& inputs, const s
             MetalBackend::setTensor(tempTensorK, encoder, 2);
             [encoder setBytes:&seq_idx length:sizeof(seq_idx) atIndex:3];
             [encoder setBuffer:mParamQKV offset:0 atIndex:4];
-            if (mQuantKey && mKVCacheManager->getKScaleBuffer() != nil) {
+            if (mKVCache && mQuantKey && mKVCacheManager->getKScaleBuffer() != nil) {
                 [encoder setBuffer:mKVCacheManager->getKScaleBuffer() offset:0 atIndex:8];
             }
             int qkGroups = mBatch * (mNumHead / group_size) * seqLenPiece;
             int maxLocalSize = ALIMAX(32, ((int)mKernel_qk_softmax.maxTotalThreadsPerThreadgroup / 32) * 32);
-            int localSize = qkGroups <= 8 ? ALIMIN(1024, maxLocalSize) :
+            int localSize = qkGroups <= 8 ? ALIMIN(maxLocalSize, ALIMAX(128, ROUND_UP(mKvSeqLen, 32))) :
                             ALIMIN(maxLocalSize, ALIMAX(64, ROUND_UP(UP_DIV(mKvSeqLen, 6), 32)));
             auto gl = std::make_pair(MTLSizeMake(mBatch * (mNumHead / group_size), seqLenPiece, 1), MTLSizeMake(localSize, 1, 1));
             [encoder dispatchThreadgroups:gl.first threadsPerThreadgroup:gl.second];
@@ -511,7 +572,7 @@ void AttentionBufExecution::onEncode(const std::vector<Tensor*>& inputs, const s
             }
             [encoder setBytes:&seq_idx length:sizeof(seq_idx) atIndex:3];
             [encoder setBuffer:mParamQKV offset:0 atIndex:4];
-            if (mKVCacheManager->getKScaleBuffer() != nil) {
+            if (mKVCache && mKVCacheManager->getKScaleBuffer() != nil) {
                 [encoder setBuffer:mKVCacheManager->getKScaleBuffer() offset:0 atIndex:8];
                 [encoder setBuffer:mKVCacheManager->getVScaleBuffer() offset:0 atIndex:9];
             }
@@ -591,7 +652,7 @@ void AttentionBufExecution::onEncode(const std::vector<Tensor*>& inputs, const s
             }
             [encoder setBytes:&seq_idx length:sizeof(seq_idx) atIndex:3];
             [encoder setBuffer:mParamQKV offset:0 atIndex:4];
-            if (mKVCacheManager->getKScaleBuffer() != nil) {
+            if (mKVCache && mKVCacheManager->getKScaleBuffer() != nil) {
                 [encoder setBuffer:mKVCacheManager->getKScaleBuffer() offset:0 atIndex:8];
                 [encoder setBuffer:mKVCacheManager->getVScaleBuffer() offset:0 atIndex:9];
             }
@@ -614,7 +675,9 @@ void AttentionBufExecution::onEncode(const std::vector<Tensor*>& inputs, const s
     }
 
     // Update status
-    mKVCacheManager->setPastLength(mKVCacheManager->kvLength() + mCurrentKvLen);
+    if (mKVCache) {
+        mKVCacheManager->setPastLength(mKVCacheManager->kvLength() + mCurrentKvLen);
+    }
     return;
 }
 
@@ -636,7 +699,7 @@ public:
             quantParam->qkScale = mhqscale[2];
             quantParam->vScale = mhqscale[3];
         }
-        return new AttentionBufExecution(backend, param->output_c4(), param->attnScale(), quantParam);
+        return new AttentionBufExecution(backend, param->kv_cache(), param->output_c4(), param->attnScale(), quantParam);
     }
 };
 REGISTER_METAL_OP_TRANSFORMER_CREATOR(AttentionBufCreator, OpType_Attention);
