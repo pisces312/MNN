@@ -1,7 +1,8 @@
 #!/bin/bash
 set -e
 
-export ANDROID_NDK=/mnt/d/dev/android_sdk/ndk/27.0.12077973
+# WSL Linux NDK: r27d = 27.3.13750724 (source.properties verified). Built under WSL, not Git Bash/cmd.
+export ANDROID_NDK=/mnt/d/dev/android-ndk-r27d
 echo "ANDROID_NDK=$ANDROID_NDK"
 
 MNN_ROOT=/mnt/d/3rd-party-projects/MNN
@@ -30,6 +31,7 @@ cmake ../../../ \
   -DMNN_SUPPORT_TRANSFORMER_FUSE=true \
   -DMNN_ARM82=true \
   -DMNN_OPENCL=true \
+  -DMNN_VULKAN=true \
   -DLLM_SUPPORT_VISION=true \
   -DMNN_BUILD_OPENCV=true \
   -DMNN_IMGCODECS=true \
