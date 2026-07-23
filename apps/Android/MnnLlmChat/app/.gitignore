@@ -3,5 +3,6 @@ google-services.json
 src/standard/google-services.json
 
 # Native libraries (downloaded at build time)
-src/main/jniLibs/arm64-v8a/libsherpa-mnn-jni.so
+# fork pisces312: track libsherpa-mnn-jni.so as prebuilt backup (2026-07)
+# src/main/jniLibs/arm64-v8a/libsherpa-mnn-jni.so
 src/main/jniLibs/arm64-v8a/libsherpa-mnn-jni.zip

@@ -368,6 +368,23 @@ project/MNNLLMForiOS/MNN.framework
 MNN-iOS-CPU-GPU/Static/MNN.framework
 apps/iOS/MNNLLMChat/MNN.framework
 
+# === fork: native prebuilt backup (pisces312, 2026-07) ===
+# Purpose: track prebuilt native libs so a fresh checkout can build APK without
+#          re-running WSL build_mnn.sh. Compiled libs (libmnnllmapp.so / libmnn_tts.so)
+#          are NOT tracked — they rebuild incrementally only when cpp sources change.
+#
+# libMNN.so: WSL build product (SEP_BUILD=OFF single lib), IMPORTed by app + mnn_tts CMake.
+#            Must unignore the directory chain because `build*/` excludes build_64/.
+!project/android/build_64/
+project/android/build_64/*
+!project/android/build_64/lib/
+project/android/build_64/lib/*
+!project/android/build_64/lib/libMNN.so
+#
+# app jniLibs third-party prebuilt (sherpa-mnn ASR, C++ runtime)
+!apps/Android/MnnLlmChat/app/src/main/jniLibs/arm64-v8a/libsherpa-mnn-jni.so
+!apps/Android/MnnLlmChat/app/src/main/jniLibs/arm64-v8a/libc++_shared.so
+
 # datasets
 datasets/*
 !datasets/*.sh
