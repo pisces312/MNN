@@ -370,8 +370,10 @@ apps/iOS/MNNLLMChat/MNN.framework
 
 # === fork: native prebuilt backup (pisces312, 2026-07) ===
 # Purpose: track prebuilt native libs so a fresh checkout can build APK without
-#          re-running WSL build_mnn.sh. Compiled libs (libmnnllmapp.so / libmnn_tts.so)
-#          are NOT tracked — they rebuild incrementally only when cpp sources change.
+#          re-running WSL build_mnn.sh. Built .so (libmnnllmapp.so / libmnn_tts.so)
+#          are backed up under app/prebuilt_native/ (copied from build/, not tracked
+#          in place) to survive `gradlew clean` and avoid clashing with AGP's own
+#          compiled copies. They rebuild incrementally only when cpp sources change.
 #
 # libMNN.so: WSL build product (SEP_BUILD=OFF single lib), IMPORTed by app + mnn_tts CMake.
 #            Must unignore the directory chain because `build*/` excludes build_64/.
@@ -384,6 +386,14 @@ project/android/build_64/lib/*
 # app jniLibs third-party prebuilt (sherpa-mnn ASR, C++ runtime)
 !apps/Android/MnnLlmChat/app/src/main/jniLibs/arm64-v8a/libsherpa-mnn-jni.so
 !apps/Android/MnnLlmChat/app/src/main/jniLibs/arm64-v8a/libc++_shared.so
+#
+# app externalNativeBuild products (libmnnllmapp.so from app/cpp, libmnn_tts.so from
+#   mnn_tts module). Backed up here (NOT in build/) so gradlew clean won't delete them
+#   and they don't collide with AGP's own compiled copy in src/main/jniLibs.
+!apps/Android/MnnLlmChat/app/prebuilt_native/
+!apps/Android/MnnLlmChat/app/prebuilt_native/arm64-v8a/
+!apps/Android/MnnLlmChat/app/prebuilt_native/arm64-v8a/libmnnllmapp.so
+!apps/Android/MnnLlmChat/app/prebuilt_native/arm64-v8a/libmnn_tts.so
 
 # datasets
 datasets/*
