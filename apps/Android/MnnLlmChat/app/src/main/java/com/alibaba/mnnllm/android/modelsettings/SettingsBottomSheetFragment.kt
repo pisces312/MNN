@@ -142,7 +142,14 @@ class SettingsBottomSheetFragment : BaseSettingsBottomSheetFragment() {
         }
 
         // Backend
-        val backendOptions = listOf("cpu", "opencl")
+        val backendOptions = buildList {
+            add("cpu")
+            add("opencl")
+            // hexagon requires bundled htp-ops libs, see HexagonModule
+            if (com.alibaba.mnnllm.android.hexagon.HexagonModule.isReady()) {
+                add("hexagon")
+            }
+        }
         val currentBackend = currentConfig.backendType.takeIf { it in backendOptions } ?: "cpu"
         binding.dropdownBackend.setCurrentItem(currentBackend)
         binding.dropdownBackend.setDropDownItems(
