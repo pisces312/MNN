@@ -9,6 +9,7 @@ import android.content.pm.ServiceInfo
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.content.ContextCompat
 import com.alibaba.mnnllm.android.chat.ChatActivity
 import com.alibaba.mnnllm.api.openai.di.ServiceLocator
@@ -27,6 +28,7 @@ class OpenAIService : Service() {
     private var currentModelId: String? = null
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var startRequestCount: Int = 0
+    private var wakeLock: PowerManager.WakeLock? = null
 
     companion object {
         private var isServiceRunning = false
@@ -147,6 +149,35 @@ class OpenAIService : Service() {
         activeInstance = this
         coordinator = ApiServiceCoordinator(this)
         coordinator.initialize()
+        acquireWakeLock()
+    }
+
+    private fun acquireWakeLock() {
+        if (wakeLock != null) return
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = pm.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "MnnLlmChat::LLMInference"
+            ).apply {
+                acquire()
+                Timber.tag(TAG).i("WakeLock acquired")
+            }
+        } catch (e: Exception) {
+            Timber.tag(TAG).e(e, "Failed to acquire WakeLock")
+        }
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let {
+            try {
+                if (it.isHeld) it.release()
+                Timber.tag(TAG).i("WakeLock released")
+            } catch (e: Exception) {
+                Timber.tag(TAG).e(e, "Failed to release WakeLock")
+            }
+        }
+        wakeLock = null
     }
 
 
@@ -156,6 +187,7 @@ class OpenAIService : Service() {
 
     override fun onDestroy() {
         Timber.tag(TAG).i("Service is being destroyed")
+        releaseWakeLock()
         serviceScope.cancel()
         cleanup()
         if (activeInstance == this) {
