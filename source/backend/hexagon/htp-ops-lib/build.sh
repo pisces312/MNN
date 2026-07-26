@@ -1,6 +1,6 @@
 #!/bin/bash
 rm -rf outputs
-source ~/third/hexagon/setup_sdk_env.source
+source /home/pisces312/hexagon-sdk-v6.6.0.0/setup_sdk_env.source
 build_cmake android
 build_cmake hexagon DSP_ARCH=$1
 mkdir outputs

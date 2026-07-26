@@ -17,6 +17,7 @@ set(ignoreVar ${DEPENDENCIES}${V})
 # NOTE(hzx): QAIC generated code are located in ${CMAKE_CURRENT_BINARY_DIR}
 set(common_incs
     ${CMAKE_CURRENT_SOURCE_DIR}/include/
+    ${CMAKE_CURRENT_SOURCE_DIR}/
     ${CMAKE_CURRENT_SOURCE_DIR}/../
     ${CMAKE_CURRENT_SOURCE_DIR}/../../../../3rd_party/flatbuffers/include/
     ${CMAKE_CURRENT_BINARY_DIR}
@@ -31,7 +32,7 @@ if(${OS_TYPE} MATCHES "HLOS")
     # HLOS dynamic binary
     add_library(htp_ops SHARED
         ${CMAKE_CURRENT_BINARY_DIR}/htp_ops_stub.c
-        ${HEXAGON_SDK_ROOT}/utils/examples/dsp_capabilities_utils.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/dsp_capabilities_utils.c
         ${CMAKE_CURRENT_SOURCE_DIR}/src/host/op_export.c
         ${CMAKE_CURRENT_SOURCE_DIR}/src/host/session.c
     )

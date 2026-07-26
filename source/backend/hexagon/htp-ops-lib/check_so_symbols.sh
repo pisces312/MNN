@@ -15,9 +15,9 @@ if [ ! -f "$SO_PATH" ]; then
 fi
 
 # 获取 undefined symbols
-NM_BIN="${HEXAGON_SDK_ROOT}/tools/HEXAGON_Tools/19.0.04/Tools/bin/hexagon-nm"
-if [ ! -x "$NM_BIN" ]; then
-    echo "Error: hexagon-nm tool not found at $NM_BIN"
+NM_BIN=$(ls "${HEXAGON_SDK_ROOT}"/tools/HEXAGON_Tools/*/Tools/bin/hexagon-nm 2>/dev/null | head -n 1)
+if [ -z "$NM_BIN" ] || [ ! -x "$NM_BIN" ]; then
+    echo "Error: hexagon-nm tool not found under ${HEXAGON_SDK_ROOT}/tools/HEXAGON_Tools/"
     exit 1
 fi
 
