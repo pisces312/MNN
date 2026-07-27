@@ -195,6 +195,28 @@ data class ModelConfig(
         /** Keys that must not be overwritten by empty string - model paths and backend from config.json */
         private val PROTECTED_KEYS = setOf("llm_model", "llm_weight", "backend_type")
 
+        /**
+         * Detect whether a model's chat template supports the thinking switch,
+         * by checking jinja.chat_template in llm_config.json for enable_thinking.
+         * Used as a fallback for local models that have no market extra_tags.
+         */
+        fun supportsThinkingSwitch(modelId: String): Boolean {
+            return try {
+                val configFilePath = getDefaultConfigFile(modelId) ?: return false
+                val modelDir = File(configFilePath).parentFile ?: return false
+                val configJson = JsonParser.parseString(File(configFilePath).readText()).asJsonObject
+                val llmConfigName = configJson.get("llm_config")?.asString ?: "llm_config.json"
+                val llmConfigFile = File(modelDir, llmConfigName)
+                if (!llmConfigFile.exists()) return false
+                val llmConfigJson = JsonParser.parseString(llmConfigFile.readText()).asJsonObject
+                val template = llmConfigJson.getAsJsonObject("jinja")?.get("chat_template")?.asString
+                template?.contains("enable_thinking") == true
+            } catch (e: Exception) {
+                Log.w(TAG, "supportsThinkingSwitch failed for modelId=$modelId", e)
+                false
+            }
+        }
+
         private fun mergeJson(original: JsonObject, override: JsonObject) {
             for (key in override.keySet()) {
                 val overrideVal = override.get(key)

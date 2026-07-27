@@ -137,18 +137,21 @@ class ChatInputComponent(
     }
     
     private fun setupThinkingMode() {
-        val extraTags = ModelListManager.getExtraTags(currentModelId)
-        if (!ModelTypeUtils.isSupportThinkingSwitchByTags(extraTags)) {
-            binding.btnToggleThinking.visibility = View.GONE
-        } else {
-            binding.btnToggleThinking.visibility = View.VISIBLE
-            // Load config off main thread to avoid ANR (file I/O)
-            chatActivity.lifecycleScope.launch {
-                val enableThinking = withContext(Dispatchers.IO) {
-                    ModelConfig.loadConfig(currentModelId)?.jinja?.context?.enableThinking != false
-                }
-                binding.btnToggleThinking.isSelected = enableThinking
+        binding.btnToggleThinking.visibility = View.GONE
+        // Resolve switch visibility off main thread: market extra_tags first,
+        // then fall back to detecting enable_thinking in the local model's chat template.
+        chatActivity.lifecycleScope.launch {
+            val extraTags = ModelListManager.getExtraTags(currentModelId)
+            val supportThinking = ModelTypeUtils.isSupportThinkingSwitchByTags(extraTags) ||
+                withContext(Dispatchers.IO) { ModelConfig.supportsThinkingSwitch(currentModelId) }
+            if (!supportThinking) {
+                return@launch
             }
+            binding.btnToggleThinking.visibility = View.VISIBLE
+            val enableThinking = withContext(Dispatchers.IO) {
+                ModelConfig.loadConfig(currentModelId)?.jinja?.context?.enableThinking != false
+            }
+            binding.btnToggleThinking.isSelected = enableThinking
         }
         binding.btnToggleThinking.setOnClickListener {
             Log.d(TAG, "handleSendClick isGenerating : ${chatActivity.isLoading}")
