@@ -18,6 +18,8 @@ interface htp_ops : remote_handle64 {
 
     AEEResult execute_command_group(in int32 groupFd, in int32 groupOffset, in int32 count, in int32 syncGroupFd, in int32 syncGroupOffset, in int32 syncGroupSize);
     AEEResult execute_command_group_profile(in int32 groupFd, in int32 groupOffset, in int32 count, in int32 syncGroupFd, in int32 syncGroupOffset, in int32 syncGroupSize, in int32 profileFd, in int32 profileOffset, in int32 profileSize);
+
+    AEEResult getDiag(rout int32 hvx_units, rout int32 vtcm_size, rout int32 hvx_arch, rout int32 rc_apptype, rout int32 rc_dcvs_v3, rout int32 rc_bus_prot, rout int32 rc_ddr_perf, rout int32 rc_hvx, rout int32 rc_hmx, rout int32 prot_compiled, rout int32 max_workers, rout int32 pool_ok);
 };
 
 #endif /* HTP_OPS_IDL */

@@ -47,6 +47,10 @@ typedef union {
 
 unsigned int g_max_num_workers = 1;
 
+// Worker pool state, surfaced to host via getInfo dst[20..21] and getDiag.
+unsigned int g_worker_pool_ok = 0;
+unsigned int g_hvx_units_raw = 0;
+
 static worker_pool_context_t g_default_pool = NULL;
 
 static unsigned int mnn_worker_clamp_count(unsigned int count) {
@@ -126,12 +130,14 @@ void worker_pool_global_init(void) {
     }
   }
   g_max_num_workers = mnn_worker_clamp_count(count);
+  g_hvx_units_raw = count;
 
   if (worker_pool_init(&g_default_pool) != AEE_SUCCESS) {
     FARF(ERROR, "MNN worker pool init failed");
     g_default_pool = NULL;
     g_max_num_workers = 1;
   }
+  g_worker_pool_ok = (g_default_pool != NULL) ? 1u : 0u;
 }
 
 void worker_pool_global_deinit(void) {

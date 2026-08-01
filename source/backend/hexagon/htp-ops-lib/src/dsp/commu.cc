@@ -411,6 +411,27 @@ static AEEResult htp_ops_getInfo_impl_internal(uint8_t *p0, bool benchmark_flops
   dst[12] = 0;
 #endif
 
+  // Diagnostics: expose power vote return codes and worker pool state to host
+  // (also surfaced via the getDiag RPC, which works where FARF logging is
+  // unavailable, e.g. retail devices without adspmsgd).
+  {
+    extern int g_mnn_power_rc[8];
+    extern unsigned int g_worker_pool_ok;
+    extern unsigned int g_hvx_units_raw;
+    for (int i = 0; i < 6; ++i) {
+      dst[13 + i] = g_mnn_power_rc[i];
+    }
+    dst[19] = g_mnn_power_rc[6];  // protected vote block compiled (1/0)
+    dst[20] = (int32_t)g_max_num_workers;
+    dst[21] = (int32_t)g_worker_pool_ok;
+#ifdef __HEXAGON_ARCH__
+    dst[22] = (int32_t)__HEXAGON_ARCH__;
+#else
+    dst[22] = 0;
+#endif
+    dst[23] = (int32_t)g_hvx_units_raw;
+  }
+
   qurt_mem_cache_clean((qurt_addr_t) dst, 256, QURT_MEM_CACHE_FLUSH, QURT_MEM_DCACHE);
   return 0;
 }
@@ -441,6 +462,38 @@ AEEResult htp_ops_getInfoProfile(remote_handle64 _h, int32 fd0, int32 offset0) {
   AEEResult res = htp_ops_getInfo_impl_internal(p0 + offset0, true);
   HAP_mmap_put(fd0);
   return res;
+}
+
+// Diagnostic RPC: return DSP state via QAIC rout scalars (no fd/mmap needed —
+// works around fastrpc_mmap not being visible to HAP_mmap_get in unsigned PD
+// on retail devices).
+AEEResult htp_ops_getDiag(remote_handle64 _h,
+                          int32 *hvx_units, int32 *vtcm_size, int32 *hvx_arch,
+                          int32 *rc_apptype, int32 *rc_dcvs_v3, int32 *rc_bus_prot,
+                          int32 *rc_ddr_perf, int32 *rc_hvx, int32 *rc_hmx,
+                          int32 *prot_compiled, int32 *max_workers, int32 *pool_ok) {
+  HtpOpsSessionContext *ctx = (HtpOpsSessionContext *)(uintptr_t)_h;
+  if (ctx == nullptr || !ctx->initialized) {
+    return AEE_EBADSTATE;
+  }
+  // Reuse getInfo_impl_internal into a temp buffer, then scatter to outputs.
+  int32_t tmp[24];
+  memset(tmp, 0, sizeof(tmp));
+  AEEResult res = htp_ops_getInfo_impl_internal((uint8_t*)tmp, false);
+  if (res != 0) return res;
+  *hvx_units     = tmp[5];
+  *vtcm_size     = tmp[4];
+  *hvx_arch      = tmp[12];
+  *rc_apptype    = tmp[13];
+  *rc_dcvs_v3    = tmp[14];
+  *rc_bus_prot   = tmp[15];
+  *rc_ddr_perf   = tmp[16];
+  *rc_hvx        = tmp[17];
+  *rc_hmx        = tmp[18];
+  *prot_compiled = tmp[19];
+  *max_workers   = tmp[20];
+  *pool_ok       = tmp[21];
+  return 0;
 }
 
 }  // extern "C"

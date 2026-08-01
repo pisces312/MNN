@@ -11,6 +11,11 @@
 
 #include <string.h>
 
+// Power vote return codes, surfaced to host via getInfo dst[13..19] and the
+// getDiag RPC (for devices where FARF logging is unavailable).
+// Indices: 0=apptype 1=dcvs_v3 2=bus_protected 3=ddr_perf 4=hvx 5=hmx 6=protected_compiled
+int g_mnn_power_rc[8] = {-1, -1, -1, -1, -1, -1, 0, -1};
+
 static int power_ctx;
 
 // TODO(hzx): maybe we should set params according to SoC model
@@ -24,6 +29,7 @@ void power_setup() {
   req.apptype = HAP_POWER_COMPUTE_CLIENT_CLASS;
 
   err = HAP_power_set(&power_ctx, &req);
+  g_mnn_power_rc[0] = err;
   if (err != AEE_SUCCESS) {
     FARF(ALWAYS, "HAP_power_set app type failed with return code 0x%x", err);
   }
@@ -48,10 +54,13 @@ void power_setup() {
   req.dcvs_v3.bus_params.target_corner = HAP_DCVS_VCORNER_MAX;
 
 #if (__HEXAGON_ARCH__ >= 79) && defined(MNN_HAVE_HAP_DCVS_H)
-  HAP_set_dcvs_v3_protected_bus_corners(&req, 1);
+  g_mnn_power_rc[6] = 1;  // protected vote block compiled
+  g_mnn_power_rc[2] = HAP_set_dcvs_v3_protected_bus_corners(&req, 1);
+  g_mnn_power_rc[3] = HAP_set_ddr_perf_mode(&req, 1);
 #endif
 
   err = HAP_power_set(&power_ctx, &req);
+  g_mnn_power_rc[1] = err;
   if (err != AEE_SUCCESS) {
     FARF(ALWAYS, "HAP_power_set DCVS v3 failed with return code 0x%x", err);
   }
@@ -61,6 +70,7 @@ void power_setup() {
   req.hvx.power_up = TRUE;
 
   err = HAP_power_set(&power_ctx, &req);
+  g_mnn_power_rc[4] = err;
   if (err != AEE_SUCCESS) {
     FARF(ALWAYS, "HAP_power_set HVX failed with return code 0x%x", err);
   }
@@ -81,6 +91,7 @@ void power_setup() {
 #endif
 
   err = HAP_power_set(&power_ctx, &req);
+  g_mnn_power_rc[5] = err;
   if (err != AEE_SUCCESS) {
     FARF(ALWAYS, "HAP_power_set HMX failed with return code 0x%x", err);
   }
