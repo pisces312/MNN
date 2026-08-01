@@ -26,19 +26,43 @@ export PATH=$QAIC_PATH:$PATH
 cd "$(dirname "$0")"
 
 echo "=== Building Android (HLOS) side ==="
-# NOTE: BUILD/HLOS_ARCH select the variant dir android_ReleaseG_aarch64 and the
-# matching prebuilt fastrpc lib; plain "build_cmake android" defaults to
-# armeabi-v7a and fails to link libcdsprpc.so.
-build_cmake android BUILD=ReleaseG HLOS_ARCH=aarch64 DOMAIN_FLAG=3 2>&1 || { echo "FAILED: android build"; exit 1; }
+# build_cmake android creates android_ReleaseG/ (32-bit armeabi-v7a) regardless
+# of HLOS_ARCH — the flag doesn't propagate to ANDROID_ABI in this SDK version.
+# We need android_ReleaseG_aarch64/ (arm64-v8a). If that dir exists (has correct
+# cmake cache), just rebuild it; otherwise configure it first.
+STUB_DIR=android_ReleaseG_aarch64
+if [ ! -d "$STUB_DIR" ]; then
+    echo "Configuring $STUB_DIR (first time)..."
+    mkdir -p "$STUB_DIR"
+    cd "$STUB_DIR"
+    cmake -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DOS_TYPE=HLOS \
+        -DANDROID_ABI=arm64-v8a \
+        -DANDROID_NDK=$HEXAGON_SDK_ROOT/tools/android-ndk-r25c \
+        -DCMAKE_TOOLCHAIN_FILE=$HEXAGON_SDK_ROOT/build/cmake/android_toolchain.cmake \
+        -DDOMAIN_FLAG=3 \
+        ..
+    cd ..
+fi
+# Touch the IDL to force QAIC regeneration (incremental builds may miss it).
+touch include/htp_ops.idl
+cmake --build "$STUB_DIR" 2>&1 || { echo "FAILED: android aarch64 build"; exit 1; }
 
 echo "=== Building Hexagon (DSP) side for $DSP_ARCH ==="
+touch include/htp_ops.idl
 build_cmake hexagon BUILD=ReleaseG DSP_ARCH=$DSP_ARCH DOMAIN_FLAG=3 2>&1 || { echo "FAILED: hexagon build"; exit 1; }
 
 echo "=== Copying outputs ==="
 rm -rf outputs
 mkdir outputs
-cp android_ReleaseG_aarch64/libMNN_htpops.so outputs/
+cp "$STUB_DIR/libMNN_htpops.so" outputs/
 cp hexagon_ReleaseG_toolv19_$DSP_ARCH/libMNN_htpops_skel.so outputs/
+
+echo "=== Verifying architecture ==="
+file outputs/libMNN_htpops.so | grep -q "aarch64" || { echo "FAILED: stub is not aarch64"; file outputs/libMNN_htpops.so; exit 1; }
+file outputs/libMNN_htpops_skel.so | grep -q "ELF" || { echo "FAILED: skel is not ELF"; exit 1; }
+echo "Architecture OK."
 
 echo "=== Checking symbols ==="
 ./check_so_symbols.sh outputs/libMNN_htpops_skel.so || { echo "FAILED: symbol check"; exit 1; }
