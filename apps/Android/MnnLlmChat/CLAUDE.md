@@ -9,8 +9,8 @@
 | 组件 | 版本 |
 |------|------|
 | MNN 引擎 | **3.6.0** |
-| App versionName | 0.8.3.1 (fork of upstream 0.8.3, fork #1) |
-| App versionCode | 25062501 (日期式 YYMMDDNN) |
+| App versionName | 0.8.3.2 (fork of upstream 0.8.3, fork #2) |
+| App versionCode | 26080101 (日期式 YYMMDDNN) |
 | Gradle | 8.9 |
 | AGP | 8.7.3 |
 | Kotlin | 2.1.21 |
@@ -59,7 +59,7 @@
 ### Fork 标识
 
 `pisces` 作为 fork 代号，**不进入 versionName / versionCode**，只出现在：
-- APK 文件名：`MnnLlmChat-v0.8.3.1-pisces-standard-signed.apk`
+- APK 文件名：`MnnLlmChat-v0.8.3.2-pisces-standard-signed.apk`
 - `BuildConfig.FORK_TAG = "pisces"`（about 页 / 日志可读）
 - git 分支名：`feature/pisces-xxx`
 - GitHub Release 标题
