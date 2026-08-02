@@ -121,6 +121,8 @@ if [[ "$SKIP_NATIVE" == false ]]; then
             -DMNN_SEP_BUILD=OFF \
             -DBUILD_PLUGIN=ON \
             -DMNN_QNN=OFF \
+            -DMNN_HEXAGON=ON \
+            -DMNN_GPU_TIME_PROFILE=ON \
             -DCMAKE_SHARED_LINKER_FLAGS='-Wl,-z,max-page-size=16384' \
             -DCMAKE_INSTALL_PREFIX=.
         make install
