@@ -159,8 +159,14 @@ void QNNStridedSlice::computeRangesType0(const std::vector<Tensor *> &inputs, st
     MNN_ASSERT(sliceDim == endTensor->length(0) && sliceDim == strideTensor->length(0));
 
     for (int i = 0; i < sliceDim; i++) {
-        beginRaw[i] = CLIP(beginRawSource[i], 0, inputs[0]->length(i) - 1);
-        endRaw[i] = CLIP(endRawSource[i], 1, inputs[0]->length(i));
+        int dim = inputs[0]->length(i);
+        // Wrap negative indices first (TF/ONNX semantics), then clip.
+        int b = beginRawSource[i];
+        int e = endRawSource[i];
+        if (b < 0) b += dim;
+        if (e < 0) e += dim;
+        beginRaw[i] = CLIP(b, 0, dim - 1);
+        endRaw[i] = CLIP(e, 1, dim);
         strideRaw[i] = strideRawSource[i];
     }
     return;
@@ -182,8 +188,14 @@ void QNNStridedSlice::computeRangesType1(const std::vector<Tensor *> &inputs, st
     for (int i = 0; i < sliceDim; i++) {
         int tempAxis = axisTensor->host<int>()[i];
         tempAxis = tempAxis >= 0 ? tempAxis : (tempAxis + mInputDim);
-        beginRaw[tempAxis] = CLIP(beginRawSource[i], 0, inputs[0]->length(tempAxis) - 1);
-        endRaw[tempAxis] = CLIP(endRawSource[i], 1, inputs[0]->length(tempAxis));
+        int dim = inputs[0]->length(tempAxis);
+        // Wrap negative indices first (TF/ONNX semantics), then clip.
+        int b = beginRawSource[i];
+        int e = endRawSource[i];
+        if (b < 0) b += dim;
+        if (e < 0) e += dim;
+        beginRaw[tempAxis] = CLIP(b, 0, dim - 1);
+        endRaw[tempAxis] = CLIP(e, 1, dim);
         strideRaw[tempAxis] = strideRawSource[i];
     }
     return;
