@@ -61,7 +61,7 @@ class LlmExporter(torch.nn.Module):
         self.config = self.model.config
         self.model_type = self.config.model_type
 
-        if self.args.awq or self.args.smooth:
+        if self.args.awq or self.args.smooth or self.args.omni:
             self.model.float()
         if self.args.export is not None:
             # set norm's weight as float for export
