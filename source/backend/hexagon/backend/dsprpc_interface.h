@@ -16,13 +16,27 @@ extern "C" {
 #define CDSP1_DOMAIN_ID   4
 
 // rpcmem
-void   rpcmem_init(void);
-void   rpcmem_deinit(void);
-void * rpcmem_alloc(int heap_id, uint32_t flags, int size);
-void   rpcmem_free(void * p);
-int    rpcmem_to_fd(void * p);
-int    rpcmem_cache_flush(void * po, int size);
-int    rpcmem_cache_invalidate(void * po, int size);
+// NOTE: the QNN backend (source/backend/qnn/backend/dsprpc_interface.cc)
+// exports the same libcdsprpc wrapper symbols. To avoid duplicate-symbol
+// link errors when MNN_HEXAGON and MNN_QNN are both enabled, the hexagon
+// backend prefixes its wrappers with mnn_hexagon_. The macro aliases below
+// keep call sites unchanged; dlsym() still resolves the real libcdsprpc
+// names at runtime.
+void   mnn_hexagon_rpcmem_init(void);
+void   mnn_hexagon_rpcmem_deinit(void);
+void * mnn_hexagon_rpcmem_alloc(int heap_id, uint32_t flags, int size);
+void   mnn_hexagon_rpcmem_free(void * p);
+int    mnn_hexagon_rpcmem_to_fd(void * p);
+int    mnn_hexagon_rpcmem_cache_flush(void * po, int size);
+int    mnn_hexagon_rpcmem_cache_invalidate(void * po, int size);
+
+#define rpcmem_init              mnn_hexagon_rpcmem_init
+#define rpcmem_deinit            mnn_hexagon_rpcmem_deinit
+#define rpcmem_alloc             mnn_hexagon_rpcmem_alloc
+#define rpcmem_free              mnn_hexagon_rpcmem_free
+#define rpcmem_to_fd             mnn_hexagon_rpcmem_to_fd
+#define rpcmem_cache_flush       mnn_hexagon_rpcmem_cache_flush
+#define rpcmem_cache_invalidate  mnn_hexagon_rpcmem_cache_invalidate
 
 #define RPCMEM_FLAG_UNCACHED 0
 #define RPCMEM_FLAG_CACHED   1  // Allocate memory with the same properties as the ION_FLAG_CACHED flag
@@ -90,8 +104,11 @@ enum fastrpc_map_flags {
     /** Update FASTRPC_MAP_MAX when adding new value to this enum **/
 };
 
-int fastrpc_mmap(int domain, int fd, void * addr, int offset, size_t length, enum fastrpc_map_flags flags);
-int fastrpc_munmap(int domain, int fd, void * addr, size_t length);
+int mnn_hexagon_fastrpc_mmap(int domain, int fd, void * addr, int offset, size_t length, enum fastrpc_map_flags flags);
+int mnn_hexagon_fastrpc_munmap(int domain, int fd, void * addr, size_t length);
+
+#define fastrpc_mmap   mnn_hexagon_fastrpc_mmap
+#define fastrpc_munmap mnn_hexagon_fastrpc_munmap
 
 #ifdef __cplusplus
 }
