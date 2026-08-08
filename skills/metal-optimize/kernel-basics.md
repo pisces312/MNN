@@ -58,6 +58,8 @@ mDequantScaleBias && !dequantInShader (area>=128 + simdgroupMatrix)
 
 修法：扩展的 kernel 里**所有相关 `#ifdef` 必须 W_QUANT_2 → W_QUANT_3 → W_QUANT_4 → W_QUANT_8 顺序**，新 bit 优先匹配。signature 和 body 都要这个顺序，少一处都 sneaky 错。
 
+**真实回归实例（2026-08 修复）**：`20e5d03f3` 给 g8 kernel 加了 W2/W3 分支（signature 顺序正确），但后来 `b71528f0d` 给 g8 body 加 W4 deferred 分支时把 `#ifdef W_QUANT_4` 放在 body 阶梯最前——alias 让 W2/3 编译同时命中 W4 body 分支（`uchar4x2` vs `uchar4*` 类型冲突）→ **所有 W2/3 decode pipeline 编译失败**（`no viable conversion from 'const device uchar4' to 'MNN::uchar4x2'`），静默持续了数周。教训：改 alias 字符串内任何 kernel 的 `#ifdef` 阶梯前，先确认该 kernel 是否在 W2/3 下编译（dispatcher 是否用它）。
+
 ### 陷阱 B：dispatcher 漏路径（lm_head）
 
 LLM 的 lm_head conv (`oc = vocab_size ~150k`) 走 `oc > 16384` 的特殊路径（如 `g16`）。新加 quant bit 没扩 g16 时，dispatch 还会进 g16 → 用错 layout 读 buffer → 数值错或 crash。
@@ -111,6 +113,12 @@ Metal 后端开 fp16（`useFp16InsteadFp32`）时，float 类型的 device tenso
 ---
 
 ## Shader 修改流程
+
+### 跨分支移植优化前先核对隐含前置
+
+性能提交可能基于已 squash 的基础设施提交开发，单看 `git cherry-pick` 的补丁无法发现这些隐含依赖。移植前先用 `git log -S'<新增 override/API>' -- <相关目录>` 定位接口来源，并确认目标分支是否已有实现；若没有，只补最小前置提交，不要整文件采用来源分支的公共 registry/backend 文件，否则会夹带无关架构改动。
+
+解决冲突后还要检查两点：核心实现文件应与来源分支的目标行为一致；被新 kernel 取代的旧 shader、pipeline 成员和 dispatch 分支必须一起删除，并用 `rg` 确认零引用。最后执行 clean rebuild 和至少一次真实 Metal 运行，因为普通 C++ 编译不能发现运行时 Metal shader 编译错误。
 
 ```bash
 # 直接编辑 .hpp 里的字符串

@@ -321,6 +321,9 @@ struct CoreFunctions {
     bool supportSDot = false;
     bool supportI8mm = false;
     bool supportSME2 = false;
+#if defined(MNN_SME2) && defined(MNN_SUPPORT_TRANSFORMER_FUSE)
+    bool supportFp16FML = false;
+#endif
     bool supportRVV = false;
     int smeCoreNumber = 0;
     /**MatMul Pack and Functions*/
@@ -372,6 +375,7 @@ struct CoreFunctions {
     // 'kq' must be precomputed as dot(k,q) by the caller.
     void (*MNNFusedGatedDelta)(float* S, const float* k, const float* q, const float* v, float* out, float decay,
                                float beta, float kq, size_t dk, size_t dv);
+    float (*MNNNormalizeQKAndDot)(float* q, float* k, float qScale, bool useL2Norm, size_t dk);
     void (*MNNCountMaxMinValue)(const float* source, float* minVal, float* maxVal, size_t size);
     // Packed layout is [channelUnit, batch, pack]. residual and sum are an optional pair; threads split batch work.
     void (*MNNNormPacked)(float* dest, float* sum, const float* source, const float* residual, const float* gamma,
@@ -534,6 +538,15 @@ struct CoreFunctions {
     void (*MNNAccumulateSequenceNumber)(float* dst, const float* src, int size);
 
     // Attention
+    // Attention-only matmul. B uses the [H/64, L/2, 64, 2] layout produced by the SME2 KV cache packer.
+#if defined(MNN_SME2) && defined(MNN_SUPPORT_TRANSFORMER_FUSE)
+    void (*MNNPackedMatMulWithSme2PackedB)(float* C, const float* A, const float* B, const size_t* parameter,
+                                            const float* postParameters, const float* bias, const float* k,
+                                            const float* b);
+    void (*MNNPackedMatMulRemainWithSme2PackedB)(float* C, const float* A, const float* B, size_t eSize,
+                                                  const size_t* parameter, const float* postParameters,
+                                                  const float* bias, const float* k, const float* b);
+#endif
     void (*MNNAttenPackAndScaleSingleHead)(float* dst, const float* srcHeadBase, size_t srcRowStride,
                                            const float* scale, const int32_t* units, size_t seqLen, size_t headDim);
     void (*MNNFlashAttentionUpdateBlockOutput)(float* dst, float* src, float* scale, float* normalizeScale,

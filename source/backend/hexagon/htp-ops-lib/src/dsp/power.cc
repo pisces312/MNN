@@ -17,6 +17,7 @@
 int g_mnn_power_rc[8] = {-1, -1, -1, -1, -1, -1, 0, -1};
 
 static int power_ctx;
+static volatile int power_ref_count = 0;
 
 // TODO(hzx): maybe we should set params according to SoC model
 void power_setup() {
@@ -113,4 +114,46 @@ void power_reset() {
 
   HAP_power_set_dcvs_v3_init(&req);
   HAP_power_set(&power_ctx, &req);
+}
+
+void power_acquire() {
+  while (true) {
+    int state = __atomic_load_n(&power_ref_count, __ATOMIC_ACQUIRE);
+    if (state > 0) {
+      if (__sync_bool_compare_and_swap(&power_ref_count, state, state + 1)) {
+        return;
+      }
+      continue;
+    }
+    if (__sync_bool_compare_and_swap(&power_ref_count, 0, 1)) {
+      power_setup();
+      return;
+    }
+  }
+}
+
+void power_release() {
+  while (true) {
+    int state = __atomic_load_n(&power_ref_count, __ATOMIC_ACQUIRE);
+    if (state <= 0) {
+      return;
+    }
+    if (state > 1) {
+      if (__sync_bool_compare_and_swap(&power_ref_count, state, state - 1)) {
+        return;
+      }
+      continue;
+    }
+    if (__sync_bool_compare_and_swap(&power_ref_count, 1, 0)) {
+      power_reset();
+      return;
+    }
+  }
+}
+
+void power_release_all() {
+  int state = __atomic_exchange_n(&power_ref_count, 0, __ATOMIC_ACQ_REL);
+  if (state > 0) {
+    power_reset();
+  }
 }
