@@ -197,6 +197,7 @@ MSYS_NO_PATHCONV=1 wsl -d Ubuntu -- bash -c 'export ANDROID_NDK=/mnt/d/dev/andro
 - 产物：`project/android/build_64/lib/libMNN.so`，APK 构建直接引用
 - `MNN_WITH_PLUGIN=ON` 是跑 QNN 离线模型的硬要求；`BUILD_PLUGIN=ON` 是无效变量（无 CMakeLists 声明）
 - QNN 与 Hexagon 同开需 hexagon 侧 dsprpc 符号改名补丁（已在 fork 中）
+- **libMNN.so 必须提交到仓库**：构建环境复杂（WSL + NDK + QNN SDK + Hexagon + dsprpc 补丁），无法在 CI 或新环境快速复现。每次重编后务必 `git add project/android/build_64/lib/libMNN.so` 一并提交。
 
 ### x86 转换工具链（WSL `~/mnn-x86-qnn-build`）
 
