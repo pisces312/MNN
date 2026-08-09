@@ -149,6 +149,10 @@ class SettingsBottomSheetFragment : BaseSettingsBottomSheetFragment() {
             if (com.alibaba.mnnllm.android.hexagon.HexagonModule.isReady()) {
                 add("hexagon")
             }
+            // qnn(npu) requires bundled QNN libs, see QnnModule
+            if (com.alibaba.mnnllm.android.qnn.QnnModule.bundledReady()) {
+                add("npu")
+            }
         }
         val currentBackend = currentConfig.backendType.takeIf { it in backendOptions } ?: "cpu"
         binding.dropdownBackend.setCurrentItem(currentBackend)

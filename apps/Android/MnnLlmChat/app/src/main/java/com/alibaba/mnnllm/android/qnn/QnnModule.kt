@@ -21,6 +21,7 @@ object QnnModule {
     //SOC_MODEL -> Hexagon Arch mapping table
     //Based on https://docs.qualcomm.com/bundle/publicresource/topics/80-63442-50/overview.html#supported-snapdragon-devices
     private val sQnnLibMap = hashMapOf<String, String>().apply {
+        put("SM8850", "V81")
         put("SM8750", "V79")
         put("SM8650", "V75")
         put("SM8550", "V73")
@@ -84,6 +85,47 @@ object QnnModule {
     fun deviceSupported(): Boolean {
         return getQnnLibVersion() != null
     }
+
+    // ------------------------------------------------------------------
+    // Bundled QNN libs (shipped in jniLibs), mirrors HexagonModule.
+    //
+    // - libQnnHtp.so is dlopen'ed by bare soname from libMNN.so, and it in
+    //   turn loads libQnnHtpV81Stub.so, so both just need to sit in the app
+    //   native lib dir (legacy jniLibs packaging extracts them there).
+    // - libQnnHtpV81Skel.so (Q6DSP skeleton) is not loaded by the Android
+    //   linker; the DSP RPC daemon reads it from ADSP_LIBRARY_PATH.
+    // ------------------------------------------------------------------
+    private const val BUNDLED_QNN_LIB_NAME = "libQnnHtp.so"
+
+    @Volatile
+    private var qnnBundledReady = false
+
+    fun setupBundled(context: Context): Boolean {
+        if (qnnBundledReady) {
+            return true
+        }
+        val nativeLibDir = context.applicationInfo.nativeLibraryDir
+        if (!File(nativeLibDir, BUNDLED_QNN_LIB_NAME).exists()) {
+            // NOTE: Log instead of Timber - runs before TimberConfig.initialize()
+            Log.i(TAG, "bundled qnn libs not found in $nativeLibDir, qnn(npu) backend unavailable")
+            return false
+        }
+        return try {
+            Os.setenv(
+                "ADSP_LIBRARY_PATH",
+                "$nativeLibDir;/vendor/lib/rfsa/adsp;/system/lib/rfsa/adsp",
+                true
+            )
+            qnnBundledReady = true
+            Log.i(TAG, "bundled qnn libs found, ADSP_LIBRARY_PATH set to $nativeLibDir")
+            true
+        } catch (t: Throwable) {
+            Log.e(TAG, "setenv ADSP_LIBRARY_PATH failed", t)
+            false
+        }
+    }
+
+    fun bundledReady(): Boolean = qnnBundledReady
 
     /**
      * Load QNN libraries from the stored download path

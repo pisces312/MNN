@@ -831,6 +831,46 @@ static SubModuleIO _getSubModuleIO(std::vector<MNN::Express::VARP> inputs, const
     return io;
 }
 
+// Run one CPU forward pass to collect KV-cache state shapes and the seq length,
+// mirroring what _getSubModuleIO does for the sub-module path. The whole-module
+// path needs the same info to write the plugin op's "state"/"seq_len" attrs.
+static void _getWholeModuleStateInfo(const std::vector<std::string>& inputNames, const std::vector<std::string>& outputNames,
+                                     const std::vector<MNN::Express::VARP>& inputs, const void* buffer, size_t bufferSize,
+                                     const std::string& srcpath, std::vector<std::vector<int>>& kvcache, int& seqLen) {
+    auto attentionNames = _getAttentionName(buffer, bufferSize);
+    MNN::ScheduleConfig config;
+    config.numThread = 1;
+    std::shared_ptr<MNN::Express::Executor::RuntimeManager> rtmgr(MNN::Express::Executor::RuntimeManager::createRuntimeManager(config));
+    rtmgr->setExternalFile((srcpath + ".weight").c_str());
+    rtmgr->setMode(MNN::Interpreter::Session_Debug);
+    std::shared_ptr<MNN::Express::Module> m(MNN::Express::Module::load(inputNames, outputNames, (const uint8_t*)buffer, bufferSize, rtmgr), MNN::Express::Module::destroy);
+    MNN::TensorCallBackWithInfo beforeCallBack = [&](const std::vector<MNN::Tensor*>& ntensors, const MNN::OperatorInfo* info) {
+        auto opName = info->name();
+        if (info->type() != "Attention") {
+            return true;
+        }
+        if (attentionNames.find(opName) != attentionNames.end()) {
+            auto query = ntensors[0];
+            auto key = ntensors[1];
+            seqLen = query->length(1);
+            auto kvNumHead = key->length(2);
+            auto headDim = key->length(3);
+            std::vector<int> kvDims = {kvNumHead, 1, 1, headDim};
+            kvcache.emplace_back(kvDims);
+        }
+        return true;
+    };
+    MNN::TensorCallBackWithInfo callBack = [&](const std::vector<MNN::Tensor*>& ntensors, const MNN::OperatorInfo* info) {
+        return true;
+    };
+    MNN::Express::ExecutorScope::Current()->setCallBack(std::move(beforeCallBack), std::move(callBack));
+    auto outputs = m->onForward(inputs);
+    for (auto& o : outputs) {
+        // Force compute so the tensor callbacks actually fire
+        MNN::Express::_Clone(o, true);
+    }
+}
+
 static int _compileWholeModule(std::vector<std::string> inputNames, std::vector<std::string> outputNames,
                                std::vector<std::vector<MNN::Express::VARP>> inputs, const std::set<int>& inputIndexes,
                                const std::set<int>& outputIndexes, const void* buffer, size_t bufferSize,
@@ -845,7 +885,21 @@ static int _compileWholeModule(std::vector<std::string> inputNames, std::vector<
         path += ("." + gOfflieDst);
     }
     std::vector<int> allInputShape;
+    // KV-cache state shapes (collected once) and per-graph seq lengths, written
+    // into the plugin op's "state"/"seq_len" attrs below. Without them the
+    // device-side plugin allocates no KV state buffers and graphExecute fails.
+    std::vector<std::vector<int>> kvcache;
+    std::vector<int> seqLens;
     for (int inputIndex = 0; inputIndex < inputs.size(); ++inputIndex) {
+        {
+            int seqLen = 0;
+            std::vector<std::vector<int>> kv;
+            _getWholeModuleStateInfo(inputNames, outputNames, inputs[inputIndex], buffer, bufferSize, srcpath, kv, seqLen);
+            if (inputIndex == 0) {
+                kvcache = std::move(kv);
+            }
+            seqLens.emplace_back(seqLen);
+        }
         std::vector<MNN::Express::Variable::Info> inputInfos(inputs[inputIndex].size());
         for (int i = 0; i < inputInfos.size(); ++i) {
             inputInfos[i] = *inputs[inputIndex][i]->getInfo();
@@ -957,6 +1011,42 @@ static int _compileWholeModule(std::vector<std::string> inputNames, std::vector<
     attr->list.reset(new ListValueT);
     attr->list->i.insert(attr->list->i.end(), allInputShape.begin(), allInputShape.end());
     extra->attr.emplace_back(std::move(attr));
+
+    if (!kvcache.empty()) {
+        // Same format as the sub-module path: "seq_len" lists one seq length per
+        // graph (aligned with allGraphName order); "state" is a flexbuffer blob.
+        attr.reset(new MNN::AttributeT);
+        attr->key = "seq_len";
+        attr->list.reset(new ListValueT);
+        attr->list->i = seqLens;
+        extra->attr.emplace_back(std::move(attr));
+
+        attr.reset(new MNN::AttributeT);
+        attr->key = "state";
+        attr->tensor.reset(new BlobT);
+        attr->tensor->dataType = DataType_DT_UINT8;
+        flexbuffers::Builder stateBuilder;
+        auto start = stateBuilder.StartMap();
+        stateBuilder.Int("number", kvcache.size() * 2);
+        stateBuilder.Int("max_length", gMaxKVSize);
+        stateBuilder.Int("axis", 2);
+        auto shapeStart = stateBuilder.StartVector("shape");
+        for (int i = 0; i < kvcache.size(); ++i) {
+            // Each KV has two states (K and V)
+            for (int j = 0; j < 2; ++j) {
+                auto vecStart = stateBuilder.StartVector();
+                for (int v = 0; v < kvcache[i].size(); ++v) {
+                    stateBuilder.Add(kvcache[i][v]);
+                }
+                stateBuilder.EndVector(vecStart, false, false);
+            }
+        }
+        stateBuilder.EndVector(shapeStart, false, false);
+        stateBuilder.EndMap(start);
+        stateBuilder.Finish();
+        attr->tensor->uint8s = stateBuilder.GetBuffer();
+        extra->attr.emplace_back(std::move(attr));
+    }
 
     for (int i = 0; i < outputInfos.size(); ++i) {
         auto outputInfo = outputInfos[i];

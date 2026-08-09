@@ -120,7 +120,9 @@ if [[ "$SKIP_NATIVE" == false ]]; then
             -DMNN_BUILD_DIFFUSION=ON \
             -DMNN_SEP_BUILD=OFF \
             -DBUILD_PLUGIN=ON \
-            -DMNN_QNN=OFF \
+            -DMNN_QNN=ON \
+            -DQNN_SDK_ROOT="${QNN_SDK_ROOT:-/mnt/d/dev/qairt/2.39.0.250926}" \
+            -DMNN_WITH_PLUGIN=ON \
             -DMNN_HEXAGON=ON \
             -DMNN_GPU_TIME_PROFILE=ON \
             -DCMAKE_SHARED_LINKER_FLAGS='-Wl,-z,max-page-size=16384' \

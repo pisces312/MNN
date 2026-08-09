@@ -167,6 +167,70 @@ Qwen、Gemma（含 Gemma 4 E2B/E4B）、Llama（TinyLlama、MobileLLM）、Baich
 - `adb shell dumpsys activity` 查看运行时信息
 - 本地 API 可通过 `http://localhost:8080` 访问（app 内嵌 Ktor server）
 
+## QNN (NPU) 编译与转换环境（WSL）
+
+> 目标设备：SM8850（8 Elite Gen5，QNN SoC ID=87，Hexagon v81）。
+> 完整调研与踩坑记录在 `D:\workspace\mnn-research\`（`qnn-backend-build.md`、`qnn-npu-model-usage.md`、`qnn-device-crash-analysis_*.md` 等），此处只记环境事实。
+
+### QAIRT (QNN) SDK
+
+- 版本 2.39.0.250926，Windows/WSL 共用同一份目录：`D:\dev\qairt\2.39.0.250926` = `/mnt/d/dev/qairt/2.39.0.250926`
+- 编译期只需 `include/QNN/` 头文件（运行时 dlopen）；x86 宿主工具在 `bin/x86_64-linux-clang/`，目标库在 `lib/aarch64-android/` 与 `lib/hexagon-v81/unsigned/`
+
+### Android libMNN.so（app 用，WSL 构建）
+
+```bash
+MSYS_NO_PATHCONV=1 wsl -d Ubuntu -- bash -c 'export ANDROID_NDK=/mnt/d/dev/android-ndk-r27d && \
+  cd /mnt/d/3rd-party-projects/MNN/project/android/build_64 && \
+  ../build_64.sh -DMNN_LOW_MEMORY=true -DMNN_CPU_WEIGHT_DEQUANT_GEMM=true \
+    -DMNN_BUILD_LLM=true -DMNN_SUPPORT_TRANSFORMER_FUSE=true -DMNN_ARM82=true \
+    -DMNN_USE_LOGCAT=true -DMNN_OPENCL=true -DLLM_SUPPORT_VISION=true \
+    -DMNN_BUILD_OPENCV=true -DMNN_IMGCODECS=true -DLLM_SUPPORT_AUDIO=true \
+    -DMNN_BUILD_AUDIO=true -DMNN_BUILD_DIFFUSION=ON -DMNN_SEP_BUILD=OFF \
+    -DBUILD_PLUGIN=ON -DMNN_QNN=ON -DMNN_WITH_PLUGIN=ON \
+    -DQNN_SDK_ROOT=/mnt/d/dev/qairt/2.39.0.250926 \
+    -DMNN_HEXAGON=ON -DMNN_GPU_TIME_PROFILE=ON \
+    -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,max-page-size=16384" \
+    -DCMAKE_INSTALL_PREFIX=.'
+```
+
+- 产物：`project/android/build_64/lib/libMNN.so`，APK 构建直接引用
+- `MNN_WITH_PLUGIN=ON` 是跑 QNN 离线模型的硬要求；`BUILD_PLUGIN=ON` 是无效变量（无 CMakeLists 声明）
+- QNN 与 Hexagon 同开需 hexagon 侧 dsprpc 符号改名补丁（已在 fork 中）
+
+### x86 转换工具链（WSL `~/mnn-x86-qnn-build`）
+
+- 构建脚本：`D:\workspace\mnn-research\build_x86_qnn_tools.sh`；关键 flags：`-DMNN_QNN=ON -DMNN_QNN_CONVERT_MODE=ON -DMNN_WITH_PLUGIN=OFF -DMNN_BUILD_TOOLS=ON -DMNN_BUILD_LLM=ON`
+- 产物工具：`generateIO`、`compilefornpu`、`MNN2QNNModel`；增量重编：`cd ~/mnn-x86-qnn-build && make compilefornpu -j8`
+- 运行需：`QNN_SDK_ROOT=/mnt/d/dev/qairt/2.39.0.250926`、`LD_LIBRARY_PATH=$QNN_SDK_ROOT/lib/x86_64-linux-clang`、`PATH` 前置 `~/qnn_toolchain_shim`（qnn-model-lib-generator 的 clang++→g++ shim）
+
+### 模型导出（llmexport.py，WSL conda env `mnnexport`）
+
+- env：`~/miniconda3/envs/mnnexport`（torch 2.13.0+cpu + transformers 5.14.1 + datasets）
+- NPU 导出必须选项：`--generate_for_npu --seperate_embed --sym --disable_transformer_c4 --quant_bit 4 --quant_block 64 --act_bit=16 --omni --hqq --calib_data <本地语料>`
+  - `--disable_transformer_c4` 官方文档未提但必须（C4 布局/FusedRoPE 不被 QNNAttention 接受）
+  - omni 校准需 llmexport.py 的 `model.float()` 补丁（transformers 5.x bf16 dtype 冲突，已在 fork）
+- 校准语料：`D:\workspace\mnn-research\calib_prompts.txt`（≥128 行）
+
+### QNN 离线转换
+
+```bash
+# WSL 内执行
+bash /mnt/d/workspace/mnn-research/convert_qnn.sh /mnt/d/models/<model_dir> <cache_name>
+```
+
+- 封装 `generate_llm_qnn.py --soc_id 87 --dsp_arch v81 --chunk_size 128 --max_history_token 2048 --vtcm_mb 8`
+- `max_history_token`（KVCACHE_SIZE_LIMIT）必须 >0，否则走子图切分路径（已验证崩溃）
+- 产物：模型目录下 `qnn/llm.mnn`（plugin op，~1.2KB）+ `qnn/graph0.bin`（HTP context，~338MB）+ `config_qnn.json`
+
+### 真机运行方式
+
+- **backend 选 `cpu`**：离线产物由注册在 CPU backend 的 plugin 算子加载执行，HTP 加速在 plugin 内部完成；`npu` 选项是在线构图入口，LLM 必崩
+- 手机模型目录 `/sdcard/mnn-models/<name>/`，目录名不得含 `qnn` 子串（会触发 app 下载流程）
+- 必需文件 7 个：`config.json`（含 `backend_type=cpu`、`llm_model=qnn/llm.mnn`、`chunk_limits=[128,1]`）、`llm_config.json`、`tokenizer.mtok`、`embeddings_bf16.bin`、`llm.mnn.weight`（仅存在性检查，必须推）、`qnn/llm.mnn`、`qnn/graph0.bin`
+- adb：`D:/dev/android_sdk/platform-tools/adb`，push 源路径用 Windows 形式（`D:/...`，Git Bash `/d/...` 不生效）
+- 抓日志：`adb logcat | grep -aE "MNNJNI|MNN_QNN|Qnn"`
+
 ## 软硬件要求
 
 - arm64-v8a 设备（仅支持 64 位）

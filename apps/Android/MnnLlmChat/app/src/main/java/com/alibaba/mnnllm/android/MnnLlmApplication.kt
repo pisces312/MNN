@@ -30,8 +30,10 @@ class MnnLlmApplication : Application() {
 
         UpdateChecker.registerDownloadReceiver(applicationContext)
         // Must run before CrashUtil.init (its static System.loadLibrary triggers
-        // loading libmnnllmapp/libMNN, which dlopens libMNN_htpops.so).
+        // loading libmnnllmapp/libMNN, which dlopens libMNN_htpops.so and
+        // libQnnHtp.so).
         com.alibaba.mnnllm.android.hexagon.HexagonModule.setup(this)
+        com.alibaba.mnnllm.android.qnn.QnnModule.setupBundled(this)
         CrashUtil.init(this)
         instance = this
         DeviceName.init(this)
