@@ -111,6 +111,10 @@ public:
         return base_dir_ + config_.value("llm_weight", "llm.mnn.weight");
     }
 
+    bool use_external_weight() const {
+        return config_.value("use_external_weight", true);
+    }
+
     std::string block_model(int index) const {
         return base_dir_ + config_.value("block_model", "block_") + std::to_string(index) + ".mnn";
     }

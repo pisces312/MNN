@@ -266,6 +266,7 @@ def output_qnn(args, model_name=None):
         if not is_visual:
             config_npu["llm_model"] = "qnn/" + model_name
             config_npu["llm_weight"] = model_name + ".weight"
+            config_npu["use_external_weight"] = False
             config_npu["chunk_limits"] = [args.chunk_size, 1]
         else:
             config_npu["visual_model"] = "qnn/visual.mnn"

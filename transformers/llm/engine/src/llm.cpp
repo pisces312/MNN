@@ -288,11 +288,15 @@ bool Llm::load() {
     // check required files before loading
     std::string tokenizer_path = mConfig->tokenizer_file();
     std::string model_path = mConfig->llm_model();
-    std::string weight_path = mConfig->llm_weight();
     if (!checkFile(tokenizer_path, "tokenizer file") ||
-        !checkFile(model_path, "LLM model file") ||
-        !checkFile(weight_path, "LLM weight file")) {
+        !checkFile(model_path, "LLM model file")) {
         return false;
+    }
+    if (mConfig->use_external_weight()) {
+        std::string weight_path = mConfig->llm_weight();
+        if (!checkFile(weight_path, "LLM weight file")) {
+            return false;
+        }
     }
     MNN::Express::ExecutorScope s(mExecutor);
     Timer _t;
@@ -361,7 +365,9 @@ bool Llm::load() {
         outputNames.emplace_back("hidden_states");
     }
 
-    mRuntimeManager->setExternalFile(weight_path);
+    if (mConfig->use_external_weight()) {
+        mRuntimeManager->setExternalFile(mConfig->llm_weight());
+    }
     if (mConfig->has_deepstack()) {
         inputNames.emplace_back("deepstack_embeds");
     }
