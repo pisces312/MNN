@@ -59,8 +59,6 @@ if (project.hasProperty('ADD_BUILTIN') && project.property('ADD_BUILTIN') == 'tr
 android {
     namespace 'com.alibaba.mnnllm.android'
     compileSdk 35
-    ndkVersion "27.3.13750724"
-    
     flavorDimensions "store"
     androidResources {
         noCompress += ['weight', 'part1', 'part2', 'part3', 'part4', 'part5', 'part6', 'part7', 'part8', 'part9', 'part10', 'mnn', 'bin', 'jar', 'mdl', 'msc', 'mv', 'txt', 'json', 'md']
@@ -69,8 +67,8 @@ android {
         applicationId "com.alibaba.mnnllm.android"
         minSdk 26
         targetSdk 35
-        versionCode 26080101
-        versionName "0.8.3.2"
+        versionCode 26080901
+        versionName "0.8.3.3"
         buildConfigField "String", "FORK_TAG", "\"pisces\""
         buildConfigField "boolean", "IS_FORK_BUILD", "true"
         buildConfigField "boolean", "ENABLE_FIREBASE", enableFirebase ? "true" : "false"
