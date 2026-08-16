@@ -31,3 +31,5 @@ cd <repo>/source/backend/hexagon/htp-ops-lib
 
 - 通过 `wsl -- bash -c` 非交互调用时 `~/.bashrc` 不会被读取，`HTP_OPS_SDK_ENV` 需显式传入或先 `source ~/.bashrc`。
 - 从 Git Bash 经 `wsl -- bash -c '...'` 传命令时，单引号内的 `$VAR` 会被调用链提前展开（变成空串）；验证变量请用 `printenv VAR`，不要 `echo $VAR`。
+- 本目录的 `dsp_capabilities_utils.c/h` 是 SDK `utils/examples` 同名文件的本地裁剪版（SDK 6.6 修正）：额外实现了 `get_hex_arch_ver()`（上游 `src/host/session.c` 需要，SDK 6.6 未提供，经 `remote_handle_control(DSPRPC_GET_DSP_INFO, ARCH_VER)` 查询）。上游若再改 `session.c` 的 skel 选择逻辑，注意同步检查这两个文件。
+- 本机设备 SM8850 = v81，构建参数用 `./build.sh v81`；部署时 skel 需以 `libMNN_htpops_skelV81.so` 和 `libMNN_htpops_skel.so`（fallback）两份放入 app `jniLibs/arm64-v8a/`，新文件受 `*.so` gitignore 限制需 `git add -f`。
