@@ -2,8 +2,9 @@
 
 ## 构建
 
-- **APK 构建必须在 Windows 下进行**（不能在 WSL 里，因为 JDK/Android SDK 路径不兼容）。使用 `.\gradlew.bat assembleStandardDebug` 或 `assembleStandardRelease`。
-- native 库（libMNN.so）的构建在 WSL 里用 build_64.sh，产物放在 `project/android/build_64/lib/`。APK 构建时直接引用。**libMNN.so 必须提交到仓库**（构建环境复杂，无法快速复现）。
+- **单一入口：`./build.sh [debug|release] [standard|googleplay] [--skip-native] [--rebuild-native]`**（Git Bash / Windows）。负责 native 检查 → gradle 构建 → 签名，产物为仓库根下 `MnnLlmChat-*-signed.apk`。
+- **APK 构建必须在 Windows 下进行**（不能在 WSL 里，因为 JDK/Android SDK 路径不兼容）。
+- native 库（libMNN.so）的构建在 WSL 里进行，脚本为 MNN 仓库根的 `build_native.sh`（`--clean` 全量重建）；`build.sh` 会在 libMNN.so 缺失或传 `--rebuild-native` 时自动通过 `wsl -d Ubuntu` 调起它。产物放在 `project/android/build_64/lib/`，APK 构建时直接引用。**libMNN.so 必须提交到仓库**（构建环境复杂，无法快速复现）。
 
 ## 真机部署
 

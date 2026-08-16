@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # MnnLlmChat Build Script
-# Usage: ./build.sh [debug|release] [standard|googleplay] [--skip-native]
+# Usage: ./build.sh [debug|release] [standard|googleplay] [--skip-native] [--rebuild-native]
 #   (default: release standard, native built first if missing)
 #
 # Examples:
@@ -8,6 +8,7 @@
 #   ./build.sh debug                    # Build debug, standard flavor
 #   ./build.sh release googleplay       # Build release, googleplay flavor
 #   ./build.sh debug standard --skip-native  # Skip MNN native build, only build APK
+#   ./build.sh --rebuild-native         # Force clean rebuild of MNN native (in WSL)
 
 set -e
 
@@ -20,24 +21,26 @@ unset MSYS_NO_PATHCONV MSYS2_ARG_CONV_EXCL
 BUILD_TYPE="${1:-release}"
 FLAVOR="${2:-standard}"
 SKIP_NATIVE=false
+REBUILD_NATIVE=false
 
 # Parse optional flags
 for arg in "$@"; do
     case "$arg" in
         --skip-native) SKIP_NATIVE=true ;;
+        --rebuild-native) REBUILD_NATIVE=true ;;
     esac
 done
 
 # Validate BUILD_TYPE
 case "$BUILD_TYPE" in
     debug|release) ;;
-    *) echo "Usage: $0 [debug|release] [standard|googleplay] [--skip-native]"; exit 1 ;;
+    *) echo "Usage: $0 [debug|release] [standard|googleplay] [--skip-native] [--rebuild-native]"; exit 1 ;;
 esac
 
 # Validate FLAVOR
 case "$FLAVOR" in
     standard|googleplay) ;;
-    *) echo "Usage: $0 [debug|release] [standard|googleplay] [--skip-native]"; exit 1 ;;
+    *) echo "Usage: $0 [debug|release] [standard|googleplay] [--skip-native] [--rebuild-native]"; exit 1 ;;
 esac
 
 # Paths
@@ -97,37 +100,23 @@ GRADLE_TASK="assemble${FLAVOR_CAP}${BUILD_TYPE_CAP}"
 
 echo "=== Building MnnLlmChat $VERSION / $BUILD_TYPE / $FLAVOR ==="
 
-# Step 1: Build MNN native library (if missing or not skipped)
+# Step 1: Build MNN native library in WSL (if missing or rebuild requested).
+# Native builds must run inside WSL (NDK + QNN SDK paths are Linux-style);
+# the actual build lives in build_native.sh at the MNN repo root.
+to_wsl_path() {
+    # D:/path/to/dir -> /mnt/d/path/to/dir
+    local p="${1//\\//}"
+    local drive="$(echo "${p:0:1}" | tr 'A-Z' 'a-z')"
+    echo "/mnt/$drive${p:2}"
+}
+
 if [[ "$SKIP_NATIVE" == false ]]; then
-    if [[ ! -f "$NATIVE_BUILD_DIR/lib/libMNN.so" ]]; then
-        echo "=== Building MNN native library ==="
-        cd "$REPO_ROOT/project/android"
-        mkdir -p build_64
-        cd build_64
-        ../build_64.sh \
-            -DMNN_LOW_MEMORY=true \
-            -DMNN_CPU_WEIGHT_DEQUANT_GEMM=true \
-            -DMNN_BUILD_LLM=true \
-            -DMNN_SUPPORT_TRANSFORMER_FUSE=true \
-            -DMNN_ARM82=true \
-            -DMNN_USE_LOGCAT=true \
-            -DMNN_OPENCL=true \
-            -DLLM_SUPPORT_VISION=true \
-            -DMNN_BUILD_OPENCV=true \
-            -DMNN_IMGCODECS=true \
-            -DLLM_SUPPORT_AUDIO=true \
-            -DMNN_BUILD_AUDIO=true \
-            -DMNN_BUILD_DIFFUSION=ON \
-            -DMNN_SEP_BUILD=OFF \
-            -DBUILD_PLUGIN=ON \
-            -DMNN_QNN=ON \
-            -DQNN_SDK_ROOT="${QNN_SDK_ROOT:-/mnt/d/dev/qairt/2.39.0.250926}" \
-            -DMNN_WITH_PLUGIN=ON \
-            -DMNN_HEXAGON=ON \
-            -DMNN_GPU_TIME_PROFILE=ON \
-            -DCMAKE_SHARED_LINKER_FLAGS='-Wl,-z,max-page-size=16384' \
-            -DCMAKE_INSTALL_PREFIX=.
-        make install
+    if [[ "$REBUILD_NATIVE" == true || ! -f "$NATIVE_BUILD_DIR/lib/libMNN.so" ]]; then
+        echo "=== Building MNN native library (WSL) ==="
+        WSL_NATIVE_SCRIPT="$(to_wsl_path "$REPO_ROOT")/build_native.sh"
+        CLEAN_FLAG=""
+        [[ "$REBUILD_NATIVE" == true ]] && CLEAN_FLAG="--clean"
+        MSYS_NO_PATHCONV=1 wsl -d Ubuntu -- bash "$WSL_NATIVE_SCRIPT" $CLEAN_FLAG
         echo "=== MNN native build done ==="
     else
         echo "=== MNN native library found, skipping build ==="

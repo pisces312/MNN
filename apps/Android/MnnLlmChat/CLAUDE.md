@@ -74,14 +74,8 @@ fork 版本（`IS_FORK_BUILD = true`）启动时：
 
 ## 构建步骤
 
-1. 先编译 MNN 引擎库：
-```bash
-cd project/android
-mkdir build_64 && cd build_64
-../build_64.sh "-DMNN_LOW_MEMORY=true -DMNN_CPU_WEIGHT_DEQUANT_GEMM=true -DMNN_BUILD_LLM=true -DMNN_SUPPORT_TRANSFORMER_FUSE=true -DMNN_ARM82=true -DMNN_USE_LOGCAT=true -DMNN_OPENCL=true -DLLM_SUPPORT_VISION=true -DMNN_BUILD_OPENCV=true -DMNN_IMGCODECS=true -DLLM_SUPPORT_AUDIO=true -DMNN_BUILD_AUDIO=true -DMNN_BUILD_DIFFUSION=ON -DMNN_SEP_BUILD=OFF -DCMAKE_INSTALL_PREFIX=."
-make install
-```
-2. 再编译 App：`cd apps/Android/MnnLlmChat && ./installDebug.sh`
+1. 编译 MNN 引擎库（WSL）：`wsl -d Ubuntu -- bash /mnt/d/3rd-party-projects/MNN/build_native.sh`（`--clean` 全量重建；详见下文「QNN (NPU) 编译与转换环境（WSL）」）
+2. 编译 App（Windows/Git Bash）：`cd apps/Android/MnnLlmChat && ./build.sh debug standard`（native 缺失时会自动调起第 1 步；`--skip-native` 只出 APK）
 
 ## 仓库结构
 
@@ -179,20 +173,13 @@ Qwen、Gemma（含 Gemma 4 E2B/E4B）、Llama（TinyLlama、MobileLLM）、Baich
 
 ### Android libMNN.so（app 用，WSL 构建）
 
+统一构建脚本：MNN 仓库根 `build_native.sh`（WSL 内执行，`--clean` 全量重建）。通常由 app 侧 `apps/Android/MnnLlmChat/build.sh` 自动调起：
+
 ```bash
-MSYS_NO_PATHCONV=1 wsl -d Ubuntu -- bash -c 'export ANDROID_NDK=/mnt/d/dev/android-ndk-r27d && \
-  cd /mnt/d/3rd-party-projects/MNN/project/android/build_64 && \
-  ../build_64.sh -DMNN_LOW_MEMORY=true -DMNN_CPU_WEIGHT_DEQUANT_GEMM=true \
-    -DMNN_BUILD_LLM=true -DMNN_SUPPORT_TRANSFORMER_FUSE=true -DMNN_ARM82=true \
-    -DMNN_USE_LOGCAT=true -DMNN_OPENCL=true -DLLM_SUPPORT_VISION=true \
-    -DMNN_BUILD_OPENCV=true -DMNN_IMGCODECS=true -DLLM_SUPPORT_AUDIO=true \
-    -DMNN_BUILD_AUDIO=true -DMNN_BUILD_DIFFUSION=ON -DMNN_SEP_BUILD=OFF \
-    -DBUILD_PLUGIN=ON -DMNN_QNN=ON -DMNN_WITH_PLUGIN=ON \
-    -DQNN_SDK_ROOT=/mnt/d/dev/qairt/2.39.0.250926 \
-    -DMNN_HEXAGON=ON -DMNN_GPU_TIME_PROFILE=ON \
-    -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,max-page-size=16384" \
-    -DCMAKE_INSTALL_PREFIX=.'
+MSYS_NO_PATHCONV=1 wsl -d Ubuntu -- bash /mnt/d/3rd-party-projects/MNN/build_native.sh --clean
 ```
+
+脚本内含完整生产 flag 集（LLM/Vision/Audio/Diffusion/OpenCL/QNN/Hexagon），NDK 用 `ANDROID_NDK` 环境变量（默认 `/mnt/d/dev/android-ndk-r27d`），QNN SDK 用 `QNN_SDK_ROOT`（默认 `/mnt/d/dev/qairt/2.39.0.250926`）。
 
 - 产物：`project/android/build_64/lib/libMNN.so`，APK 构建直接引用
 - `MNN_WITH_PLUGIN=ON` 是跑 QNN 离线模型的硬要求；`BUILD_PLUGIN=ON` 是无效变量（无 CMakeLists 声明）
