@@ -114,3 +114,10 @@ Public skills are listed below. Environment-dependent skills may exist under `sk
 | Bugfix / debugging | `skills/general-debug/SKILL.md` | Diagnose correctness bugs / regressions in MNN — organized by bug category. |
 | Run tests / CI | `skills/test-ci/SKILL.md` | Run the regression / CI suite (host or on-device), benchmark LLM on a real iPhone/iPad, or add / select / retune a test stage |
 | Retrospective | `skills/retrospective/SKILL.md` | After non-trivial tasks with reusable lessons |
+
+
+## Fork Note (pisces312)
+
+本 fork 的 Android app（MnnLlmChat）构建入口与原生库（libMNN.so）重建指南见
+`apps/Android/MnnLlmChat/AGENTS.md`「构建」一节（APK 在 Windows/Git Bash 构建，
+native 在 WSL 构建，单一入口 `build.sh`）。

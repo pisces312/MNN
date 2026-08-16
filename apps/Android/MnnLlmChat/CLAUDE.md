@@ -74,8 +74,10 @@ fork 版本（`IS_FORK_BUILD = true`）启动时：
 
 ## 构建步骤
 
-1. 编译 MNN 引擎库（WSL）：`wsl -d Ubuntu -- bash /mnt/d/3rd-party-projects/MNN/build_native.sh`（`--clean` 全量重建；详见下文「QNN (NPU) 编译与转换环境（WSL）」）
-2. 编译 App（Windows/Git Bash）：`cd apps/Android/MnnLlmChat && ./build.sh debug standard`（native 缺失时会自动调起第 1 步；`--skip-native` 只出 APK）
+1. 编译 MNN 引擎库（WSL）：`wsl -d Ubuntu -- bash /mnt/d/3rd-party-projects/MNN/build_native.sh [--clean]`
+2. 编译 App（Windows/Git Bash）：`cd apps/Android/MnnLlmChat && ./build.sh [debug|release] [standard|googleplay]`
+
+完整环境前提（JDK/SDK/NDK/签名 env）、产物验证与注意事项见同目录 `AGENTS.md`「构建」一节（权威来源，以此为准）。
 
 ## 仓库结构
 
@@ -173,16 +175,10 @@ Qwen、Gemma（含 Gemma 4 E2B/E4B）、Llama（TinyLlama、MobileLLM）、Baich
 
 ### Android libMNN.so（app 用，WSL 构建）
 
-统一构建脚本：MNN 仓库根 `build_native.sh`（WSL 内执行，`--clean` 全量重建）。通常由 app 侧 `apps/Android/MnnLlmChat/build.sh` 自动调起：
-
-```bash
-MSYS_NO_PATHCONV=1 wsl -d Ubuntu -- bash /mnt/d/3rd-party-projects/MNN/build_native.sh --clean
-```
-
-脚本内含完整生产 flag 集（LLM/Vision/Audio/Diffusion/OpenCL/QNN/Hexagon），NDK 用 `ANDROID_NDK` 环境变量（默认 `/mnt/d/dev/android-ndk-r27d`），QNN SDK 用 `QNN_SDK_ROOT`（默认 `/mnt/d/dev/qairt/2.39.0.250926`）。
+构建命令与完整步骤见同目录 `AGENTS.md`「构建 → 重建 native」(权威来源）。此处只记 QNN 特有事实：
 
 - 产物：`project/android/build_64/lib/libMNN.so`，APK 构建直接引用
-- `MNN_WITH_PLUGIN=ON` 是跑 QNN 离线模型的硬要求；`BUILD_PLUGIN=ON` 是无效变量（无 CMakeLists 声明）
+- `MNN_WITH_PLUGIN=ON` 是跑 QNN 离线模型的硬要求（`build_native.sh` 已含）；`BUILD_PLUGIN=ON` 是无效变量（无 CMakeLists 声明）
 - QNN 与 Hexagon 同开需 hexagon 侧 dsprpc 符号改名补丁（已在 fork 中）
 - **libMNN.so 必须提交到仓库**：构建环境复杂（WSL + NDK + QNN SDK + Hexagon + dsprpc 补丁），无法在 CI 或新环境快速复现。每次重编后务必 `git add project/android/build_64/lib/libMNN.so` 一并提交。
 
