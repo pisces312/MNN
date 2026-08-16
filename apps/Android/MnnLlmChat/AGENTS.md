@@ -59,8 +59,8 @@ MSYS_NO_PATHCONV=1 wsl -d Ubuntu -- bash /mnt/d/3rd-party-projects/MNN/build_nat
 | 组件 | 版本 |
 |------|------|
 | MNN 引擎 | **3.6.0** |
-| App versionName | 0.8.3.3 (fork of upstream 0.8.3) |
-| App versionCode | 26080901 (日期式 YYMMDDNN) |
+| App versionName | 0.8.3.4 (fork of upstream 0.8.3) |
+| App versionCode | 26081701 (日期式 YYMMDDNN) |
 | Gradle | 8.9 |
 | AGP | 8.7.3 |
 | Kotlin | 2.1.21 |
