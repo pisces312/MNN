@@ -58,7 +58,6 @@ template <typename T>
 static inline VARP _var(std::vector<T> vec, const std::vector<int> &dims) {
     return _Const(vec.data(), dims, NHWC, halide_type_of<T>());
 }
-
 // Redefine MNN_PRINT/MNN_ERROR for Llm member methods to capture log into mContext->log_buffer.
 // All code below this point that uses MNN_PRINT/MNN_ERROR must be Llm class member methods.
 #ifdef LLM_LOG_TO_STRING
@@ -113,19 +112,31 @@ void Llm::setChatTemplate() {
     if (!mTokenizer || !mConfig->config_.contains("jinja")) return;
     auto jinja = mConfig->config_["jinja"];
     if (jinja.contains("chat_template")) {
-        std::string context;
-        if (jinja.contains("context")) {
-            context = jinja["context"].dump();
+        ujson::json context_json = jinja.contains("context") ? jinja["context"] : ujson::json::object();
+        if (!context_json.is_object()) {
+            context_json = ujson::json::object();
         }
-        mTokenizer->set_chat_template(jinja["chat_template"].get<std::string>(), jinja.value("eos", ""), context);
+        if (mConfig->config_.contains("asr_language")) {
+            context_json["asr_language"] = mConfig->asr_language();
+        }
+        mTokenizer->set_chat_template(jinja["chat_template"].get<std::string>(), jinja.value("eos", ""),
+                                      context_json.dump());
     }
-    if (jinja.contains("context")) {
-        mTokenizer->set_chat_template_context(jinja["context"].dump());
+    if (jinja.contains("context") || mConfig->config_.contains("asr_language")) {
+        ujson::json context_json = jinja.contains("context") ? jinja["context"] : ujson::json::object();
+        if (!context_json.is_object()) {
+            context_json = ujson::json::object();
+        }
+        if (mConfig->config_.contains("asr_language")) {
+            context_json["asr_language"] = mConfig->asr_language();
+        }
+        mTokenizer->set_chat_template_context(context_json.dump());
     }
 }
 
 bool Llm::set_config(const std::string& content) {
     mConfig->config_.merge(ujson::json::parse(content));
+    mConfig->mllm_config_ = mConfig->config_.contains("mllm") ? mConfig->config_["mllm"] : ujson::json();
     setChatTemplate();
     mAsync = mConfig->config_.value("async", true);
     mGenerateParam->timeout_ms = mConfig->timeout_ms();
@@ -157,6 +168,16 @@ void Llm::setDebugCallback(MNN::TensorCallBackWithInfo&& before, MNN::TensorCall
     mExecutor->setCallBack(std::move(before), std::move(after));
 }
 
+bool Llm::generateTTS(const std::string& text, const std::string& language, int max_new_tokens,
+                      const std::string& ref_audio) {
+    (void)text;
+    (void)language;
+    (void)max_new_tokens;
+    (void)ref_audio;
+    MNN_ERROR("[Error]: current model does not support TTS generation\n");
+    return false;
+}
+
 void Llm::setRuntimeHint(std::shared_ptr<Express::Executor::RuntimeManager> &rtg, bool mllm) {
     rtg->setHint(MNN::Interpreter::INIT_THREAD_NUMBER, 4);
 
@@ -175,6 +196,16 @@ void Llm::setRuntimeHint(std::shared_ptr<Express::Executor::RuntimeManager> &rtg
         rtg->setHint(MNN::Interpreter::USE_CACHED_MMAP, 1);
     }
     std::string tmpPath = mConfig->tmp_path();
+    if (!tmpPath.empty() && !MNNCreateDir(tmpPath.c_str())) {
+        // Everything below only writes into tmpPath, so a missing directory
+        // costs the GPU shader cache and the mmap'd weight / KV cache -- a
+        // silent per-run recompile, not a failure. Say so once, with the name,
+        // because callers derive it programmatically (llm_demo hashes the config
+        // path) and cannot be expected to guess it from the error alone.
+        MNN_ERROR("Llm: cannot create cache dir '%s' (no write permission?). Continuing without "
+                  "disk cache; create the directory yourself to restore it.\n",
+                  tmpPath.c_str());
+    }
     if (mConfig->kvcache_mmap()) {
         rtg->setExternalPath(tmpPath, MNN::Interpreter::EXTERNAL_PATH_KVCACHE_DIR);
     }
@@ -187,7 +218,9 @@ void Llm::setRuntimeHint(std::shared_ptr<Express::Executor::RuntimeManager> &rtg
     rtg->setExternalPath(mConfig->npu_model_dir(), MNN::Interpreter::EXTERNAL_NPU_FILE_DIR);
     rtg->setHint(MNN::Interpreter::DYNAMIC_QUANT_OPTIONS, mConfig->config_.value("dynamic_option", 0));
 
-    rtg->setHintPtr(Interpreter::KVCACHE_INFO, mMeta.get());
+    if (!mllm) {
+        rtg->setHintPtr(Interpreter::KVCACHE_INFO, mMeta.get());
+    }
     if (backend_type_convert(mConfig->backend_type(mllm)) != 0) { // not cpu
         std::string cacheFilePath = tmpPath.length() != 0 ? tmpPath : ".";
         rtg->setCache(cacheFilePath + "/mnn_cachefile.bin");
@@ -433,14 +466,17 @@ bool Llm::load() {
         }
 
         if (mConfig->is_mrope()) {
-            mPositionIdsVarVec[i] = _Input({3, index}, NCHW, halide_type_of<int>());
+            mPositionIdsVarVec[i] = _Input({mConfig->mrope_axes(), index}, NCHW, halide_type_of<int>());
         } else {
             mPositionIdsVarVec[i] = _Input({1, index}, NCHW, halide_type_of<int>());
         }
     }
 
-    // MTP model load
-    mGenerationStrategy->load(module_config);
+    // Generation strategy modules (MTP / EAGLE / DFlash drafts)
+    if (!mGenerationStrategy->load(module_config)) {
+        MNN_ERROR("Llm::load: generation strategy failed to load\n");
+        return false;
+    }
     mContext->load_us += _t.durationInUs();
     mContext->status = LlmStatus::RUNNING;  // Set status to RUNNING after successful load
     return true;
@@ -577,12 +613,15 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
     std::vector<Express::VARP> outputs = selectModule->onForward(inputs);
 
     if (outputs.empty()) {
+        MNN_ERROR("[Error]: onForward returned no outputs. seqLen=%d, inDecode=%d, inputs=%zu, moduleKey=(%d,%d)\n",
+                  seqLen, (int)inDecode, inputs.size(), seqLenKey, (int)isAllLogists);
         mContext->status = LlmStatus::INTERNAL_ERROR;
         return outputs;
     }
     // Validate output VARP and readMap
     for (auto o : outputs) {
         if(nullptr == o || nullptr == o->readMap<float>()) {
+            MNN_ERROR("[Error]: invalid output tensor from onForward. output_count=%zu\n", outputs.size());
             mContext->status = LlmStatus::INTERNAL_ERROR;
             return outputs;
         }
@@ -1097,6 +1136,11 @@ void Llm::response(const std::vector<int>& input_ids, std::ostream* os, const ch
     if (!end_with) { end_with = "\n"; }
     generate_init(os, end_with);
     CHECK_LLM_RUNNING(mContext);
+    if (input_ids.empty()) {
+        MNN_ERROR("[Error]: empty input_ids in Llm::response\n");
+        mContext->status = LlmStatus::INTERNAL_ERROR;
+        return;
+    }
     generate(input_ids, max_new_tokens);
 }
 
@@ -1119,6 +1163,11 @@ void Llm::response(const std::string& user_content, std::ostream* os, const char
         }
     }
     std::vector<int> input_ids = tokenizer_encode(prompt);
+    if (input_ids.empty()) {
+        MNN_ERROR("[Error]: empty input_ids after tokenizer_encode in Llm::response(text)\n");
+        mContext->status = LlmStatus::INTERNAL_ERROR;
+        return;
+    }
     response(input_ids, os, end_with, max_new_tokens);
 }
 
@@ -1128,7 +1177,7 @@ void Llm::response(const ChatMessages& chat_prompts, std::ostream* os, const cha
     if (chat_prompts.empty()) {
         return;
     }
-    auto prompt = apply_chat_template(chat_prompts);
+    std::string prompt = apply_chat_template(chat_prompts);
 
     // Prompt cache: compare current prompt text against the previous turn's to
     // find the common prefix, then only tokenize and prefill the new suffix.
@@ -1136,7 +1185,7 @@ void Llm::response(const ChatMessages& chat_prompts, std::ostream* os, const cha
         // Use add_generation_prompt=false for comparison to avoid enable_thinking
         // asymmetry: the template adds <think> to the LAST assistant message only
         // when true. Using false renders all messages consistently.
-        auto prompt_for_compare = mTokenizer->apply_chat_template(chat_prompts, false);
+        std::string prompt_for_compare = mTokenizer->apply_chat_template(chat_prompts, false);
         size_t text_common = 0;
         size_t text_max = std::min(mCachedPromptText.size(), prompt_for_compare.size());
         while (text_common < text_max && mCachedPromptText[text_common] == prompt_for_compare[text_common])
@@ -1597,6 +1646,11 @@ VARP Llm::gen_attention_mask(int seq_len) {
 
 VARP Llm::gen_position_ids(int seq_len) {
     MNN::Express::ExecutorScope s(mExecutor);
+    int maxPos = mConfig->max_position_embeddings();
+    if (maxPos > 0 && mContext->all_seq_len <= maxPos && mContext->all_seq_len + seq_len > maxPos) {
+        MNN_PRINT("[MNN:LLM] Warning: sequence length %d exceeds max_position_embeddings (%d), output quality may degrade.\n",
+                  mContext->all_seq_len + seq_len, maxPos);
+    }
     if (mConfig->attention_mask() == "glm") {
         // chatglm
         if (needNewVar(positionIds, 2, seq_len)) {
@@ -1621,8 +1675,9 @@ VARP Llm::gen_position_ids(int seq_len) {
             auto ptr = mPositionIdsVarVec[0]->writeMap<int>();
             ptr[0] = is_glm2 ? mContext->gen_seq_len : mContext->all_seq_len;
             if (mConfig->is_mrope()) {
-                ptr[1] = ptr[0];
-                ptr[2] = ptr[0];
+                for (int axis = 1; axis < mConfig->mrope_axes(); axis++) {
+                    ptr[axis] = ptr[0];
+                }
             }
             return mPositionIdsVarVec[0];
         }
@@ -1631,16 +1686,21 @@ VARP Llm::gen_position_ids(int seq_len) {
             for (int i = 0; i < seq_len; i++) {
                 ptr[i] = i + mContext->all_seq_len;
             }
+            if (mConfig->is_mrope()) {
+                for (int axis = 1; axis < mConfig->mrope_axes(); axis++) {
+                    ::memcpy(ptr + axis * seq_len, ptr, seq_len * sizeof(int));
+                }
+            }
             return mPositionIdsVarVec[1];
         }
 
         if (mConfig->is_mrope()) {
-            positionIds = _Input({3, seq_len}, NCHW, halide_type_of<int>());
+            positionIds = _Input({mConfig->mrope_axes(), seq_len}, NCHW, halide_type_of<int>());
             auto ptr = positionIds->writeMap<int>();
-            for (int i = 0; i < seq_len; i++) {
-                ptr[0 * seq_len + i] = i + mContext->all_seq_len;
-                ptr[1 * seq_len + i] = i + mContext->all_seq_len;
-                ptr[2 * seq_len + i] = i + mContext->all_seq_len;
+            for (int axis = 0; axis < mConfig->mrope_axes(); axis++) {
+                for (int i = 0; i < seq_len; i++) {
+                    ptr[axis * seq_len + i] = i + mContext->all_seq_len;
+                }
             }
             return positionIds;
         }

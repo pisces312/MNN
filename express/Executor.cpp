@@ -293,11 +293,13 @@ bool Executor::RuntimeManager::getInfo(Interpreter::SessionInfoCode code, void* 
             auto dst = (int*)ptr;
             if (!mInside->mRuntime.first.empty()) {
                 *dst = mInside->mRuntime.first.begin()->first;
+                return true;
             }
         } break;
         case Interpreter::RESIZE_STATUS: {
             auto dst = (int*)ptr;
             *dst = mInside->mResizeStatus;
+            return true;
         } break;
         default: {
             // Do nothing
@@ -621,6 +623,9 @@ void Executor::_makeCache(const std::vector<EXPRP>& expr, bool forceCPU) {
         scheduleInfo.pipelineInfo[0].first.info.type = MNN_FORWARD_CPU;
     } else {
         scheduleInfo.pipelineInfo[0].first.info.type = current->getAttr()->firstType;
+        // numThread aliases gpuMode for GPU backends; without it the geometry
+        // context sees the Backend::Info default instead of the executor's mode.
+        scheduleInfo.pipelineInfo[0].first.info.numThread = current->getAttr()->numThread;
     }
     scheduleInfo.pipelineInfo[0].first.needComputeShape = false;
     scheduleInfo.pipelineInfo[0].first.needComputeGeometry = mLazyMode != LAZY_CONTENT;

@@ -228,7 +228,7 @@ python llmexport.py \
   ```
   编译完成后 `build/` 目录下会生成 `MNNConvert` 可执行文件，`llmexport.py` 默认会在 `../../../build/` 下查找该工具；也可以通过 `--mnnconvert` 选项显式指定 MNNConvert 路径。若未提供本地 MNNConvert，脚本会回退到 pymnn（需先安装 `pip install MNN`）。此方案目前支持导出4bit和8bit模型。
 
-  > **C4 融合与引擎兼容性**：`llmexport.py` 默认开启 Transformer C4 图融合，以减少布局转换并提升 CPU、Metal、OpenCL、CUDA 和 Vulkan 后端的推理性能。默认导出的模型依赖支持 C4 RoPE/Attention 布局的新版 MNN 引擎，无法在不包含相关实现的历史引擎上运行；可使用 `--disable_transformer_c4` 导出兼容模型。新引擎仍兼容旧的非 C4 模型。独立使用 `MNNConvert` 时 C4 融合同样默认开启，可通过 `--transformerFuseC4=0` 显式关闭。
+  > **C4 融合与引擎兼容性**：`llmexport.py` 默认开启 Transformer C4 图融合，以减少布局转换并提升 CPU、Metal、OpenCL、CUDA 和 Vulkan 后端的推理性能。默认导出的模型依赖支持 C4 RoPE/Attention 布局的新版 MNN 引擎，无法在不包含相关实现的历史引擎上运行；可使用 `--disable_transformer_c4` 导出兼容模型（该开关是总开关，会同时强制关闭下述所有 `fuse_*` 子融合，详见[图融合开关](#图融合开关)）。新引擎仍兼容旧的非 C4 模型。独立使用 `MNNConvert` 时 C4 融合同样默认开启，可通过 `--transformerFuseC4=0` 显式关闭。
 - 如果直接转为mnn模型遇到问题，或者需要其他bits数的量化（如5bit/6bit），可以先将模型先转为onnx模型，使用`--export onnx`，然后使用./MNNConvert工具将onnx模型转为mnn模型:
 
 ```
@@ -243,11 +243,18 @@ python llmexport.py \
 ### 参数
 执行 `python llmexport.py -h` 可查看参数：
 ```
-usage: llmexport.py [-h] --path PATH [--type TYPE] [--tokenizer_path TOKENIZER_PATH] [--lora_path LORA_PATH]
-                    [--gptq_path GPTQ_PATH] [--dst_path DST_PATH] [--verbose] [--test TEST] [--export EXPORT]
-                    [--onnx_slim] [--quant_bit QUANT_BIT] [--quant_block QUANT_BLOCK]
-                    [--lm_quant_bit LM_QUANT_BIT] [--mnnconvert MNNCONVERT] [--ppl] [--awq] [--omni] [--sym] [--seperate_embed]
-                    [--lora_split] [--disable_transformer_c4]
+usage: llmexport.py [-h] --path PATH [--type TYPE] [--tokenizer_path TOKENIZER_PATH] [--eagle_path EAGLE_PATH]
+                    [--dflash_path DFLASH_PATH] [--lora_path LORA_PATH] [--gptq_path GPTQ_PATH]
+                    [--dst_path DST_PATH] [--verbose] [--test TEST] [--export EXPORT] [--onnx_slim]
+                    [--quant_bit QUANT_BIT] [--quant_block QUANT_BLOCK] [--visual_quant_bit VISUAL_QUANT_BIT]
+                    [--visual_quant_block VISUAL_QUANT_BLOCK] [--lm_quant_bit LM_QUANT_BIT]
+                    [--lm_quant_block LM_QUANT_BLOCK] [--mnnconvert MNNCONVERT] [--ppl] [--awq] [--hqq] [--omni]
+                    [--transformer_fuse] [--disable_transformer_c4] [--group_conv_native] [--smooth] [--sym]
+                    [--scale_bit {16,32}] [--visual_sym] [--seperate_embed] [--lora_split]
+                    [--fuse_linear_attn_gate] [--disable_fuse_linear_attn_gate] [--disable_fuse_qkv_proj]
+                    [--disable_fuse_gate_up_proj] [--disable_fuse_ln_proj] [--calib_data CALIB_DATA]
+                    [--act_bit ACT_BIT] [--embed_bit {16,8,4}] [--act_sym] [--quant_config QUANT_CONFIG]
+                    [--generate_for_npu] [--skip_weight]
 
 llm_exporter
 
@@ -260,37 +267,95 @@ optional arguments:
   --type TYPE           type(`str`, *optional*):
                             The pretrain llm model type.
   --tokenizer_path TOKENIZER_PATH
-                        tokenizer path, defaut is `None` mean using `--path` value.
+                        tokenizer path, default is `None` mean using `--path` value.
+  --eagle_path EAGLE_PATH
+                        eagle model path, default is `None`
+  --dflash_path DFLASH_PATH
+                        dflash draft model path, default is `None`
   --lora_path LORA_PATH
-                        lora path, defaut is `None` mean not apply lora.
+                        lora path, default is `None` mean not apply lora.
   --gptq_path GPTQ_PATH
-                        gptq path, defaut is `None` mean not apply gptq.
-  --dst_path DST_PATH   export onnx/mnn model to path, defaut is `./model`.
+                        gptq path, default is `None` mean not apply gptq.
+  --dst_path DST_PATH   export onnx/mnn model to path, default is `./model`.
   --verbose             Whether or not to print verbose.
   --test TEST           test model inference with query `TEST`.
   --export EXPORT       export model to an onnx/mnn model.
   --onnx_slim           Whether or not to use onnx-slim.
   --quant_bit QUANT_BIT
-                        mnn quant bit, 4 or 8, default is 4.
+                        mnn quant bit, 2/3/4/8 (2 and 3 require ARMV86 i8mm + FP16), default is 4.
   --quant_block QUANT_BLOCK
-                        mnn quant block, 0 mean channle-wise, default is 128.
+                        mnn quant block, 0 mean channel-wise, default is 64.
   --visual_quant_bit VISUAL_QUANT_BIT
                         mnn visual model quant bit, 4 or 8, default is setting in utils/vision.py by different vit model.
   --visual_quant_block VISUAL_QUANT_BLOCK
                         mnn visual model quant block, 0 mean channle-wise, default is setting in utils/vision.py by different vit model.
   --lm_quant_bit LM_QUANT_BIT
                         mnn lm_head quant bit, 4 or 8, default is `quant_bit`.
+  --lm_quant_block LM_QUANT_BLOCK
+                        mnn lm_head quant block, 0 mean channle-wise, default is `quant_block`.
   --mnnconvert MNNCONVERT
                         local mnnconvert path, if invalid, using pymnn.
-  --disable_transformer_c4
-                        Disable LLM C4 graph fusion for compatibility with older runtimes.
   --ppl                 Whether or not to get all logits of input tokens.
   --awq                 Whether or not to use awq quant.
-  --sym                 Whether or not to using symmetric quant (without zeropoint), defualt is False.
-  --visual_sym          Whether or not to using symmetric quant (without zeropoint) for visual model, defualt is False.
-  --seperate_embed      For lm and embed shared model, whether or not to sepearte embed to avoid quant, defualt is False, if True, embed weight will be seperate to embeddingbf16.bin.
-  --lora_split          Whether or not export lora split, defualt is False.
+  --hqq                 Whether or not to use hqq quant.
+  --omni                Whether or not to use omni quant.
+  --transformer_fuse    Whether or not to fuse vision transformer op.
+  --disable_transformer_c4
+                        Disable LLM C4 graph fusion for compatibility with older runtimes.
+                        Also turns off every fused-op export that requires MNN_SUPPORT_TRANSFORMER_FUSE
+                        (fuse_qkv_proj / fuse_gate_up_proj / fuse_ln_proj / fuse_linear_attn_gate).
+  --group_conv_native   Whether or not to keep native group_conv.
+  --smooth              Whether or not to use smooth quant.
+  --sym                 Whether or not to using symmetric quant (without zeropoint), default is False.
+  --scale_bit {16,32}   Bit-width for quant scale/zero-point storage, default is 16 (fp16).
+  --visual_sym          Whether or not to using symmetric quant (without zeropoint) for visual model, default is False.
+  --seperate_embed      For lm and embed shared model, whether or not to sepearte embed to avoid quant, default is False, if True, embed weight will be seperate to embedding bf16.bin.
+  --lora_split          Whether or not export lora split, default is False.
+  --fuse_linear_attn_gate
+                        Fold linear-attention gate/beta constants into LinearAttentionParam, removing the
+                        exported softplus/sigmoid chain. On by default; implemented by CPU, Metal, CUDA and
+                        the buffer-mode OpenCL / Vulkan backends (image-mode OpenCL / Vulkan have no
+                        LinearAttention execution at all and already run it on CPU).
+  --disable_fuse_linear_attn_gate
+                        Disable the linear-attention gate fold. Needed for engines predating gate_fold
+                        support: they ignore the flag and consume the raw `a` projection as the decay gate,
+                        which is wrong output rather than a load error.
+  --disable_fuse_qkv_proj
+                        Do not let MNNConvert group shared-input q/k/v (and linear-attention) projections into one FusedLinear op.
+  --disable_fuse_gate_up_proj
+                        Do not let MNNConvert group dense SwiGLU gate/up projections into one FusedLinear op.
+  --disable_fuse_ln_proj
+                        Do not fold the block-input binary RMSNorm into fused projection ops (has_ln variant).
+  --calib_data CALIB_DATA
+                        calibration data path, default is `None` mean not use calib data.
+  --act_bit ACT_BIT     smooth quant act bit, 8 or 16, default is 16.
+  --embed_bit {16,8,4}  embedding export bit precision, choices are 16 (bf16), 8 (int8), 4 (int4), default is 16.
+  --act_sym             smooth quant act us sym or not, default asym.
+  --quant_config QUANT_CONFIG
+                        path to the JSON file for op-wise quantization configuration.
+  --generate_for_npu    Whether or not to generate model for NPU deployment, default is False.
+  --skip_weight         Whether or not to skip loading model weights, useful for testing export flow.
 ```
+
+### 图融合开关
+
+`llmexport.py` 提供一个总开关和四个子开关控制 Transformer 图融合，层级关系如下：
+
+| 开关 | 默认 | 说明 |
+|------|:---:|------|
+| `--disable_transformer_c4` | 开启（C4 融合） | **总开关**。关闭后强制关闭下面全部四个子融合，同时不再导出 fused RoPE，用于兼容不含 `MNN_SUPPORT_TRANSFORMER_FUSE` 实现的历史引擎 |
+| `--disable_fuse_qkv_proj` | 开启 | 单独关闭 q/k/v（及 linear-attention 四路）投影合并为一个 FusedLinear 算子 |
+| `--disable_fuse_gate_up_proj` | 开启 | 单独关闭 MLP SwiGLU gate/up 投影合并为一个 FusedLinear 算子 |
+| `--disable_fuse_ln_proj` | 开启 | 单独关闭块输入 RMSNorm 折叠进融合投影算子（has_ln 变体） |
+| `--disable_fuse_linear_attn_gate` | 开启 | 单独关闭 linear-attention 的 gate/beta 常量折叠进 LinearAttentionParam（消除导出图里的 softplus/sigmoid 链）。CPU、Metal、CUDA 以及 buffer 模式的 OpenCL / Vulkan 均已实现；image 模式的 OpenCL / Vulkan 没有 LinearAttention 实现，本来就在 CPU 上执行 |
+
+规则说明：
+
+- **总开关优先**：`--disable_transformer_c4` 生效时，四个子开关的取值一律被覆盖为关闭，即使显式传入了 `--fuse_linear_attn_gate` 也不会生效。
+- **lora_split 联动**：使用 `--lora_split` 时，`fuse_qkv_proj` 和 `fuse_gate_up_proj` 会被自动关闭（成员投影需保持独立以便逐投影匹配 lora 权重），`fuse_ln_proj` 不受影响。
+- **MNNConvert 侧映射**：前三个开关最终映射为 MNNConvert 参数 `--transformerFuseC4` / `--transformerFuseQkvProj` / `--transformerFuseGateUpProj` / `--transformerFuseLnProj`（1 开 0 关），独立使用 MNNConvert 时可直接指定。gate 折叠在 Python 侧导出时完成，没有对应的 MNNConvert 参数。
+- **旧引擎兼容**：`gate_fold` 打开后导出图里不再有 gate/beta 计算链，而它是 LinearAttentionParam 的新增字段——不认识该字段的历史引擎会把 raw `a` 投影直接当作 decay gate 使用，**结果错误且不会报错**。需要在这类引擎上运行时请传 `--disable_fuse_linear_attn_gate`。注意与 C4 新算子的区别：`FusedLinear` / `GatedRMSNorm` 在旧引擎上是加载即失败（响亮），gate 折叠是静默算错。
+
 
 
 ### 权重读取
@@ -659,6 +724,12 @@ messages.emplace_back("tool", R"({"temperature": 72, "condition": "sunny"})");
 ## 针对prompt中的每行进行回复
 ./llm_demo model_dir/llm.mnn prompt.txt
 ```
+
+`qwen3_tts_demo` 用于 Qwen3-TTS 文本转语音端到端示例，参数为：
+```
+./qwen3_tts_demo model_dir --text <text> [max_frames] [dump_dir] [language] --ref_audio <wav> [--normalize [target_peak]]
+```
+其中 `model_dir` 是 Qwen3-TTS MNN 模型目录，`text` 是要合成的文本，`max_frames` 是最多生成的 codec 帧数（默认 128，每帧约 80ms，长句可提高，遇到 EOS 会提前停止；设置过小会截断语音），`dump_dir` 用于保存 wav/bin 调试输出，`language` 默认是 `auto`，可选 `auto/chinese/english/german/italian/portuguese/spanish/japanese/korean/french/russian`，`--ref_audio <wav>` 必填，用于 speaker-embedding-only 音色克隆，加载时会用 soxr-like 高质量重采样器重采样到 24 kHz；不带 `--ref_audio` 的零 speaker embedding 路径不支持，评测参考音频需从 `https://modelscope.cn/datasets/huangzhengxiang/qwen3-tts-ref/resolve/master/qwen3_tts_ref.wav` 下载到 `transformers/llm/resource/audio/qwen3_tts_ref.wav`，`--normalize [target_peak]` 只对保存的 wav 做峰值归一化，不填值时为 1。
 
 - 对于视觉大模型，在prompt中嵌入图片输入
 ```
@@ -1062,6 +1133,7 @@ make -j16
 | `--cache_path` | str | `tmp` | 转换过程中的临时缓存目录 |
 | `--chunk_size` | int | `128` | NPU 的 chunk 大小 |
 | `--max_history_token` | int | `0` | 最大历史 token 数，0 表示不限制 |
+| `--reuse_config_qnn_json` | bool | (选填) | 是否复用config_qnn.json |
 
 ##### 用法一：转换 LLM 语言模型
 
@@ -1104,6 +1176,8 @@ python3 npu/generate_llm_qnn.py \
 ```
 
 转换完成后，会在模型目录下生成 `qnn/` 子目录和 `config_qnn.json`（其中 `visual_model` 字段指向转换后的 QNN 视觉模型）。
+
+> **注意**: `--reuse_config_qnn_json` 用于llm/visual均使用npu推理场景,该参数对先转换llm或visual没有限制，只需在第二次转换时带上`--resue_config_qnn_json`即可。
 
 ##### 用法三：使用自定义 input_json 转换任意模型
 

@@ -443,3 +443,5 @@ apps/iOS/MNNLLMChat/MNNLLMiOS/LocalModel/Qwen2.5-Omni-3B-MNN
 
 ### WorkBuddy
 .workbuddy/
+
+model/
