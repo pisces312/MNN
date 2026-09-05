@@ -20,6 +20,12 @@
 
 #ifdef MNN_SUPPORT_TRANSFORMER_FUSE
 #define MNN_FLASH_ATTENTION_BLOCK_SIZE 64
+// Single-thread decode has no causal-mask waste, so a larger kv block amortizes per-block
+// fixed costs (softmax setup, PV prologue, flash rescale) and lengthens contiguous K/V
+// stream runs (64KB->2MB), lifting achieved DRAM bandwidth ~35->49 GB/s. Measured at
+// kv~4160 (speed/attention t1 decode): 256->512->1024->2048->4096 = 14.7->12.9->11.8->11.1->11.2 ms;
+// 2048 reaches the single-core stream wall.
+#define MNN_FLASH_ATTENTION_BLOCK_DECODE 2048
 #endif
 
 extern "C" {
@@ -326,6 +332,8 @@ struct CoreFunctions {
 #endif
     bool supportRVV = false;
     int smeCoreNumber = 0;
+    // Performance-cluster core count; 0 means unknown / not applicable.
+    int perfCoreNumber = 0;
     /**MatMul Pack and Functions*/
     void (*MNNGetMatMulPackMode)(int* eP, int* lP, int* hP);
     void (*MNNGetSparseMatMulPackMode)(int* eP, int* lP, int* hP);
@@ -375,12 +383,23 @@ struct CoreFunctions {
     // 'kq' must be precomputed as dot(k,q) by the caller.
     void (*MNNFusedGatedDelta)(float* S, const float* k, const float* q, const float* v, float* out, float decay,
                                float beta, float kq, size_t dk, size_t dv);
+    // Fused decode-path (L=1) depthwise Conv1D(K=4) + SiLU over a contiguous
+    // channel range (linear attention). state: [channels][3], x: [channels],
+    // w: [channels][4]; out[c] = silu(state[c]·w[c][0..2] + x[c]*w[c][3]) and
+    // state[c] shifts to (s1, s2, x[c]) in place. fp16 memory under float* ABI
+    // convention; fp32 accumulation. Null when the backend has no specialized
+    // kernel — the caller then falls back to a scalar loop.
+    void (*MNNDecodeConv1DSiluK4Fp16)(float* state, const float* x, const float* w, float* out,
+                                      int channels) = nullptr;
     float (*MNNNormalizeQKAndDot)(float* q, float* k, float qScale, bool useL2Norm, size_t dk);
     void (*MNNCountMaxMinValue)(const float* source, float* minVal, float* maxVal, size_t size);
-    // Packed layout is [channelUnit, batch, pack]. residual and sum are an optional pair; threads split batch work.
-    void (*MNNNormPacked)(float* dest, float* sum, const float* source, const float* residual, const float* gamma,
-                          const float* beta, float epsilon, size_t batch, size_t channels, bool RMSNorm, int tId,
-                          int threadNumber);
+    // Packed layout [UP_DIV(channels, pack), batch, pack] for source/residual/sumOut/
+    // normOut; gamma/beta are [channels]. sumOut (outputs[0], the source+residual sum)
+    // and residual are an optional pair, null for the plain form. normOut is outputs[1]
+    // when a sum is produced, outputs[0] otherwise. Threads split batch work.
+    void (*MNNNormPacked)(float* normOut, float* sumOut, const float* source, const float* residual,
+                          const float* gamma, const float* beta, float epsilon, size_t batch, size_t channels,
+                          bool RMSNorm, int tId, int threadNumber) = nullptr;
     void (*MNNDynamicUpdateConvBiasScale)(float* newbias, float* oldbias, float* weightKernelSum, float* inputZero,
                                           size_t ocQuad);
     void (*MNNAsyQuantInfo)(float* scale, float* bias, float* qscale, float* qbias, float* dstMin, float* dstMax,

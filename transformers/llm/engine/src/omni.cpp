@@ -939,13 +939,22 @@ std::vector<int> Omni::qwen2VisionProcess(VARP image) {
         moduleInputs.push_back(weight_tensor);
     }
 #ifdef DEBUG_IMAGE
-    patches.fix(MNN::Express::VARP::CONSTANT);
-    patches->setName("patches");
-    position_ids.fix(MNN::Express::VARP::CONSTANT);
-    position_ids->setName("position_ids");
-    attention_mask.fix(MNN::Express::VARP::CONSTANT);
-    attention_mask->setName("attention_mask");
-    MNN::Express::Variable::save({patches, position_ids, attention_mask}, "input.mnn");
+    {
+        std::vector<MNN::Express::VARP> saveInputs;
+        for (int i = 0; i < (int)moduleInputs.size(); ++i) {
+            auto v = moduleInputs[i];
+            if (!v.fix(MNN::Express::VARP::CONSTANT)) {
+                MNN_ERROR("DEBUG_IMAGE: cannot materialize input %s, skip saving input.mnn\n", inputNames[i].c_str());
+                saveInputs.clear();
+                break;
+            }
+            v->setName(inputNames[i]);
+            saveInputs.push_back(v);
+        }
+        if (!saveInputs.empty()) {
+            MNN::Express::Variable::save(saveInputs, "input.mnn");
+        }
+    }
 #endif
     auto outputs = mVisionModule->onForward(moduleInputs);
     auto imageEmbedding = outputs[0];
@@ -963,7 +972,9 @@ std::vector<int> Omni::qwen2VisionProcess(VARP image) {
     imgIds.push_back(mVisionEnd);
     return imgIds;
 }
+#endif // LLM_SUPPORT_VISION
 
+#ifdef LLM_SUPPORT_VISION
 std::vector<int> Omni::hunyuanVisionProcess(VARP image) {
     MNN::Express::ExecutorScope s(mExecutor);
     int patchSize = mConfig->config_.value("hunyuan_patch_size", 16);
@@ -1330,6 +1341,9 @@ std::vector<int> Omni::minicpmVisionProcess(VARP image) {
 }
 #endif
 
+// Kept outside the big LLM_SUPPORT_VISION block: videoProcess calls it from a
+// vision-agnostic path, so the no-vision build needs the #else fallback below
+// to link (it reports INTERNAL_ERROR at runtime instead).
 std::vector<int> Omni::qwenVideoProcess(const std::vector<VARP>& frames, const std::vector<float>& timestamps) {
 #ifdef LLM_SUPPORT_VISION
     if (frames.empty()) {
