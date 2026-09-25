@@ -362,10 +362,12 @@ bool BufferConvertor::convertToNC4HW4Buffer(const Tensor *buffer, const OpenCLBu
             } else
 #endif
             {
+                kernelFile = "buffer_convert_filter_buf";
                 kernelName = "conv2d_filter_buffer_to_nc4hw4_buffer";//NC4HW4 (1, 4*ic/4, kw*kh*oc/4, 1)*4
             }
             break;
         case DW_CONV2D_FILTER:
+            kernelFile = "buffer_convert_filter_buf";
             kernelName = "dw_filter_buffer_to_nc4hw4_buffer";//NC4HW4 (1, kw*kh, oc/4, 1)*4
         case NHWC_BUFFER:
         case NCHW_BUFFER:
@@ -482,6 +484,9 @@ bool convertBufferToBuffer(Tensor *input, Tensor *output, OpenCLRuntime *runtime
                                                          cl::NDRange(gws[0], gws[1]),
                                                          cl::NDRange(lws[0], lws[1]), nullptr, nullptr);
         MNN_CHECK_CL_SUCCESS(res, "buffer_set_zero");
+        if (res != CL_SUCCESS) {
+            return false;
+        }
     }
     if (srcDimensionFormat == dstDimensionFormat && MNN_DATA_FORMAT_NC4HW4 != dstDimensionFormat){
         int size = outputShape[0] * outputShape[1] * outputShape[2] * outputShape[3];
@@ -535,7 +540,10 @@ bool convertBufferToBuffer(Tensor *input, Tensor *output, OpenCLRuntime *runtime
                                                              cl::NDRange(roundUpGroupWorkSize[0], roundUpGroupWorkSize[1]),
                                                              cl::NDRange(lws[0], lws[1]), nullptr, &event);
         MNN_CHECK_CL_SUCCESS(res, "buffer_convert_to_buffer");
-        
+        if (res != CL_SUCCESS) {
+            return false;
+        }
+
         if (true == needWait) {
             event.wait();
         }
@@ -593,7 +601,10 @@ bool convertBufferToBuffer(Tensor *input, Tensor *output, OpenCLRuntime *runtime
                                                            cl::NDRange(roundUpGroupWorkSize[0], roundUpGroupWorkSize[1], roundUpGroupWorkSize[2]),
                                                            cl::NDRange(lws[0], lws[1], lws[2]), nullptr, &event);
         MNN_CHECK_CL_SUCCESS(res, "buffer_convert_to_buffer");
-        
+        if (res != CL_SUCCESS) {
+            return false;
+        }
+
         if (true == needWait) {
             event.wait();
         }

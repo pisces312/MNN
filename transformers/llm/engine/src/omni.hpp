@@ -139,11 +139,13 @@ private:
     MropeInfo mPositionIds;
     std::vector<VARP> mTalkerEmbeds;
     std::shared_ptr<Module> mPreDit, mDit, mBigvgan;
-    std::shared_ptr<Module> mQwen3PromptEmbedder, mQwen3CodePredictor, mQwen3CodecEmbedder, mQwen3SpeechDecoder;
+    std::shared_ptr<Module> mQwen3PromptEmbedder, mQwen3AudioCodePredictor, mQwen3CodecEmbedder, mQwen3SpeechDecoder;
     std::shared_ptr<Module> mQwen3SpeakerEncoder;
-    std::shared_ptr<DiskEmbedding> mQwen3TextEmbedding, mQwen3CodePredictorEmbedding;
+    std::shared_ptr<DiskEmbedding> mQwen3TextEmbedding, mQwen3AudioCodePredictorEmbedding;
     Llm* mThinker;
     std::shared_ptr<Executor::RuntimeManager> mProcessorRuntimeManager, mQwen3RuntimeManager;
+    std::shared_ptr<Executor::RuntimeManager> mQwen3CpRuntimeManager;
+    std::shared_ptr<KVMeta> mQwen3CpMeta;
     // stream generate
     std::vector<float> mInitialNoise, mWaveformBuffer;
     VARP mMelBuffer = nullptr;
@@ -191,6 +193,7 @@ public:
     virtual std::vector<int> tokenizer_encode(const std::string& query) override;
     virtual std::vector<int> tokenizer_encode(const MultimodalPrompt& multimodal_input) override;
     virtual Express::VARP embedding(const std::vector<int>& input_ids) override;
+    virtual Express::VARP gen_attention_mask(int seq_len) override;
     virtual Express::VARP gen_position_ids(int seq_len) override;
     virtual void response(const std::vector<int>& input_ids, std::ostream* os = &std::cout, const char* end_with = nullptr, int max_new_tokens = -1) override;
     virtual void setWavformCallback(std::function<bool(const float*, size_t, bool)> callback) override;

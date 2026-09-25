@@ -177,7 +177,7 @@ class LlmExporter(torch.nn.Module):
     @torch.no_grad()
     def response(self, query):
         # self.imitate_quant()
-        self.model.decode_buffer = []
+        self.tokenizer.decode_buffer.clear()
         messages = [
             {"role": "user", "content": query}
         ]
@@ -226,13 +226,15 @@ class LlmExporter(torch.nn.Module):
             seq_len += 1
             new_tokens += 1
             if token_id in self.tokenizer.stop_ids:
-                print("", end='\n')
+                print(self.tokenizer.flush_decode_buffer(), end='\n')
                 break
 
             # Use tokenizer's method for decoding
             word = self.tokenizer.id_to_str(token_id)
             print(word, end="", flush=True)
             input_ids = token_id
+
+        print(self.tokenizer.flush_decode_buffer(), end="", flush=True)
 
         if hasattr(self.model, 'talker') and self.model.talker is not None:
             self.model.talker.generate()
@@ -685,8 +687,8 @@ class LlmExporter(torch.nn.Module):
                     onnx_name = os.path.basename(onnx_path)
                     if onnx_name == 'talker.onnx':
                         weight_ops = getattr(self.talker, 'unloaded_ops', None)
-                    elif onnx_name == 'code_predictor.onnx' and hasattr(self.talker, 'code_predictor'):
-                        weight_ops = getattr(self.talker.code_predictor, 'unloaded_ops', None)
+                    elif onnx_name == 'code_predictor.onnx' and hasattr(self.talker, 'audio_code_predictor'):
+                        weight_ops = getattr(self.talker.audio_code_predictor, 'unloaded_ops', None)
                 converter = MNNConverter(self, weight_ops) if weight_ops is not None else self.mnn_converter
                 converter.export(onnx_path, self.talker.quant_bit)
                 if weight_ops is not None:
@@ -1041,7 +1043,7 @@ def build_args(parser):
     parser.add_argument('--disable_fuse_linear_attn_gate', dest='fuse_linear_attn_gate', action='store_false',
                         help='Disable the linear-attention gate fold. Needed for engines predating gate_fold support: they ignore the flag and consume the raw `a` projection as the decay gate, which is wrong output rather than a load error.')
     parser.add_argument('--disable_fuse_qkv_proj', dest='fuse_qkv_proj', action='store_false', default=True,
-                        help='Do not let MNNConvert group shared-input q/k/v (and linear-attention) projections into one FusedLinear op.')
+                        help='Do not let MNNConvert group shared-input q/k/v projections of regular Attention into one FusedLinear op. (Linear-attention in_proj projections are always fused regardless of this flag, since the LinearAttention op requires C4-fused inputs.)')
     parser.add_argument('--disable_fuse_gate_up_proj', dest='fuse_gate_up_proj', action='store_false', default=True,
                         help='Do not let MNNConvert group dense SwiGLU gate/up projections into one FusedLinear op.')
     parser.add_argument('--disable_fuse_ln_proj', dest='fuse_ln_proj', action='store_false', default=True,

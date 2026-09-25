@@ -12,6 +12,28 @@
 namespace MNN {
 namespace OpenCL {
 
+// Measured winners for the fused residual add; handing them to the tuner keeps Wide from sweeping the
+// full grid. Only Adreno was measured, and only below the gws ceiling where the shortlist still holds.
+static LwsShortlist2D binaryAddC4LwsShortlist(GpuType gpuType, uint32_t gws0) {
+    if (gpuType != ADRENO || gws0 > 262144) {
+        return LwsShortlist2D();
+    }
+    static const uint32_t smallPool[][2] = {{4, 1}, {8, 1}, {16, 1}, {32, 1}, {64, 1}, {128, 1}, {256, 1}, {32, 2}};
+    static const uint32_t mediumPool[][2] = {{32, 1}, {64, 1}, {128, 1}, {256, 1}, {32, 2}};
+    const uint32_t (*pool)[2] = smallPool;
+    size_t count = sizeof(smallPool) / sizeof(smallPool[0]);
+    if (gws0 > 1024) {
+        pool = mediumPool;
+        count = sizeof(mediumPool) / sizeof(mediumPool[0]);
+    }
+    LwsShortlist2D shortlist;
+    shortlist.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        shortlist.push_back({{pool[i][0], pool[i][1]}});
+    }
+    return shortlist;
+}
+
 LayerNormBufExecution::LayerNormBufExecution(const std::vector<Tensor*>& inputs, const MNN::Op* op, Backend* backend)
     : CommonExecution(backend, op) {
     mOpenCLBackend = static_cast<OpenCLBackend*>(backend);
@@ -56,6 +78,7 @@ LayerNormBufExecution::LayerNormBufExecution(const std::vector<Tensor*>& inputs,
                                                              CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR,
                                                              ALIGN_UP4(size) * bufferUnitSize));
             }
+            OPENCL_CHECK_PTR_CTOR(mResource->mGammaBuffer);
             if (mOpenCLBackend->getRuntime()->hint().useCachedMmap <= 1) {
                 auto GammaPtrCL = mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueMapBuffer(
                     *(mResource->mGammaBuffer.get()), true, CL_MAP_WRITE, 0, ALIGN_UP4(size) * bufferUnitSize, nullptr,
@@ -75,6 +98,8 @@ LayerNormBufExecution::LayerNormBufExecution(const std::vector<Tensor*>& inputs,
                     }
                 } else {
                     MNN_ERROR("Map error GammaPtrCL == nullptr \n");
+                    mValid = false;
+                    return;
                 }
                 mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueUnmapMemObject(*mResource->mGammaBuffer.get(),
                                                                                          GammaPtrCL);
@@ -90,6 +115,7 @@ LayerNormBufExecution::LayerNormBufExecution(const std::vector<Tensor*>& inputs,
                                                             CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR,
                                                             ALIGN_UP4(size) * bufferUnitSize));
             }
+            OPENCL_CHECK_PTR_CTOR(mResource->mBetaBuffer);
             if (mOpenCLBackend->getRuntime()->hint().useCachedMmap <= 1) {
                 auto BetaPtrCL = mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueMapBuffer(
                     *(mResource->mBetaBuffer.get()), true, CL_MAP_WRITE, 0, ALIGN_UP4(size) * bufferUnitSize, nullptr,
@@ -109,6 +135,8 @@ LayerNormBufExecution::LayerNormBufExecution(const std::vector<Tensor*>& inputs,
                     }
                 } else {
                     MNN_ERROR("Map error BetaPtrCL == nullptr \n");
+                    mValid = false;
+                    return;
                 }
                 mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueUnmapMemObject(*mResource->mBetaBuffer.get(),
                                                                                          BetaPtrCL);
@@ -141,6 +169,50 @@ int LayerNormBufExecution::getLocalSize(int size, int maxGroupSize) {
         local_size *= 2;
     }
     return local_size;
+}
+
+void LayerNormBufExecution::prebuildOpenCLPrograms(const std::vector<Tensor*>& inputs,
+                                                   const std::vector<Tensor*>& outputs) {
+    if (inputs.empty()) {
+        return;
+    }
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    auto input = inputs[0];
+    const bool isNC4HW4 = TensorUtils::getDescribe(input)->dimensionFormat == MNN_DATA_FORMAT_NC4HW4;
+    const int rank = input->dimensions();
+    int innerSize = 1;
+    for (int i = rank - mResource->axis_size; i < rank; ++i) {
+        innerSize *= input->length(i);
+    }
+    if (mResource->group_ > 1) {
+        innerSize = 1;
+        for (int i = 1; i < rank; ++i) {
+            innerSize *= input->length(i);
+        }
+        innerSize /= mResource->group_;
+    }
+    if (isNC4HW4) {
+        innerSize = input->length(1);
+    }
+
+    const auto maxLocalSize =
+        std::min(std::min(runtime->getMaxWorkItemSizes()[0], mResource->mMaxWorkGroupSize), static_cast<uint32_t>(256));
+    const int localSize = getLocalSize(isNC4HW4 ? UP_DIV(innerSize, 4) : innerSize / 4, maxLocalSize);
+    std::set<std::string> buildOptions = {"-DLOCAL_SIZE=" + std::to_string(localSize)};
+    if (mResource->RMSNorm) {
+        buildOptions.emplace("-DRMSNORM");
+    }
+    if (mResource->has_gamma_beta_) {
+        buildOptions.emplace("-DGAMMA_BETA");
+    }
+    if (!isNC4HW4 && innerSize % 4 != 0) {
+        buildOptions.emplace("-DPACK_LEAVE");
+    }
+    runtime->submitPrebuild("layernorm_buf", buildOptions, mOpenCLBackend->getPrecision(), nullptr, nullptr, true,
+                            true);
+    if (isNC4HW4 && inputs.size() == 2 && outputs.size() == 2) {
+        runtime->submitPrebuild("layernorm_buf", {}, mOpenCLBackend->getPrecision(), nullptr, nullptr, true, true);
+    }
 }
 
 ErrorCode LayerNormBufExecution::onEncode(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) {
@@ -214,6 +286,49 @@ ErrorCode LayerNormBufExecution::onEncode(const std::vector<Tensor*>& inputs, co
         buildOptions.emplace("-DPACK_LEAVE");
     }
 
+    // Folding the residual add into the row reduce only pays when the rows are
+    // few: NC4HW4 places consecutive channel units outter_size*4 floats apart, so
+    // inside the reduce the add's accesses are strided, while the standalone
+    // binary_add_c4_buf below walks the tensor flat and coalesced. Measured on
+    // Adreno with Qwen3-0.6B: decode (1 row) +1.4% end to end, 512-row prefill
+    // -6%. So fuse for decode-shaped batches only.
+    // NOTE: this threshold was tuned on Adreno; other GPU architectures may
+    // benefit from a different cutoff.  Adjust kFusedBinaryRmsMaxRows if
+    // benchmarks on a new target show a regression.
+    static constexpr int kFusedBinaryRmsMaxRows = 4;
+    if (splitBinaryLN && mResource->RMSNorm && outter_size <= kFusedBinaryRmsMaxRows) {
+        // ---------- Single-kernel FUSED path ----------
+        // out0 = in0 + in1, out1 = RMSNorm(out0), one workgroup per row. Saves
+        // the second launch and out0's DRAM round-trip that the split path below
+        // pays; the C4 transformer blocks run this op twice per layer.
+        mUnits.resize(1);
+        auto& unit = mUnits[0];
+        unit.kernel = runtime->buildKernel("layernorm_buf", "binary_add_rms_norm_c4_buf", buildOptions,
+                                           mOpenCLBackend->getPrecision());
+        OPENCL_CHECK_KERNEL(unit.kernel);
+        mGWS = {(uint32_t)local_size, (uint32_t)outter_size};
+        mLWS = {(uint32_t)local_size, 1};
+        uint32_t idx = 0;
+        cl_int ret = CL_SUCCESS;
+        ret |= unit.kernel->get().setArg(idx++, mGWS[0]);
+        ret |= unit.kernel->get().setArg(idx++, mGWS[1]);
+        ret |= unit.kernel->get().setArg(idx++, openCLBuffer(inputs[0]));
+        ret |= unit.kernel->get().setArg(idx++, openCLBuffer(inputs[1]));
+        ret |= unit.kernel->get().setArg(idx++, openCLBuffer(outputs[0])); // residual out
+        ret |= unit.kernel->get().setArg(idx++, openCLBuffer(outputs[1])); // normalized
+        ret |= unit.kernel->get().setArg(idx++, (int32_t)inner_size);
+        if (mResource->has_gamma_beta_) {
+            ret |= unit.kernel->get().setArg(idx++, *mResource->mGammaBuffer.get());
+            ret |= unit.kernel->get().setArg(idx++, *mResource->mBetaBuffer.get());
+        }
+        ret |= unit.kernel->get().setArg(idx++, mResource->epsilon_);
+        MNN_CHECK_CL_SUCCESS(ret, "setArg binary_add_rms_norm_c4_buf");
+        mOpenCLBackend->recordKernel2d(unit.kernel, mGWS, mLWS);
+        unit.globalWorkSize = {mGWS[0], mGWS[1]};
+        unit.localWorkSize = {mLWS[0], mLWS[1]};
+        return NO_ERROR;
+    }
+
     if (splitBinaryLN) {
         // ---------- Two-kernel SPLIT path ----------
         int total_size_float = outter_size * ROUND_UP(inner_size, 4);
@@ -238,7 +353,8 @@ ErrorCode LayerNormBufExecution::onEncode(const std::vector<Tensor*>& inputs, co
             aret |= u0.kernel->get().setArg(aidx++, total_size_float);
             MNN_CHECK_CL_SUCCESS(aret, "setArg binary_add_c4_buf");
             std::vector<uint32_t> lwsVec = localWS2DDefault(gwsVec, maxWGS, runtime, "binary_add_c4_buf", u0.kernel,
-                                                            mOpenCLBackend->getCLTuneLevel(), "layernorm_buf")
+                                                            mOpenCLBackend->getCLTuneLevel(), "layernorm_buf",
+                                                            binaryAddC4LwsShortlist(runtime->getGpuType(), gwsVec[0]))
                                                .first;
             mOpenCLBackend->recordKernel2d(u0.kernel, gwsVec, lwsVec);
             u0.globalWorkSize = {gwsVec[0], gwsVec[1]};

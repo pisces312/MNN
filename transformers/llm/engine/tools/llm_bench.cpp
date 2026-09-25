@@ -2,7 +2,10 @@
 #include "core/MNNFileUtils.h"
 #include <MNN/AutoTime.hpp>
 #include <MNN/expr/ExecutorScope.hpp>
-#include "Profiler.hpp"
+#include <MNN/Interpreter.hpp>
+#include <MNN/Tensor.hpp>
+#include <chrono>
+#include <map>
 #include <fstream>
 #include <sstream>
 #include <regex>
@@ -151,10 +154,13 @@ template <typename T> static T stdev(const std::vector<T> & v) {
     if (v.size() <= 1) {
         return 0;
     }
-    T mean   = avg(v);
-    T sq_sum = std::inner_product(v.begin(), v.end(), v.begin(), T(0));
-    T stdev  = std::sqrt(sq_sum / (T) (v.size() - 1) - mean * mean * (T) v.size() / (T) (v.size() - 1));
-    return stdev;
+    const T mean = avg(v);
+    T sq_sum = 0;
+    for (const auto& value : v) {
+        const T delta = value - mean;
+        sq_sum += delta * delta;
+    }
+    return std::sqrt(sq_sum / (T) (v.size() - 1));
 }
 
 template <class T> static std::string join(const std::vector<T> & values, const std::string & delim) {
@@ -180,6 +186,9 @@ struct TestInstance {
     std::vector<int64_t>     nGenerates;
     std::vector<int64_t>     prefillUs;
     std::vector<int64_t>     decodeUs;
+    // Wall-clock us for the decode phase (total response wall minus prefill),
+    // so it includes sampling and other host work that decode_us excludes.
+    std::vector<int64_t>     decodeWallUs;
     std::vector<int64_t>     samplesUs;
     std::vector<double>      loadingS;
     int                      backend;
@@ -849,6 +858,7 @@ static void printUsage(int /* argc */, char ** argv) {
     printf("  -fa, --flash-attention <0|1>              (default: 1) | Note: 1=enable flash attention, 0=disable\n");
     printf("  -j, --json <filename>                     (default: llm_bench.json) | Note: if set, output result to a JSON file\n");
     printf("  --profile                                 Enable operator-level profiling to print detailed timing statistics\n");
+    printf("\nBenchmark uses greedy sampling and ignores EOS for fixed-length workloads.\n");
 }
 
 
@@ -1097,8 +1107,13 @@ static bool parseCmdParams(int argc, char ** argv, RuntimeParameters & runtimePa
 
 static Llm* buildLLM(const std::string& config_path, int backend, int memory, int precision, int threads, int power, int dynamic_option, bool use_mmap, int divisionRatioSme2Neon, int promptLen, int quant_kv, int flash_attention) {
     auto llmPtr = Llm::createLLM(config_path);
+    // Every repetition must execute the requested number of decode steps.
+    // Random sampling + EOS otherwise changes the workload and inflates tgN
+    // throughput when N is divided by the time of an early-stopped response.
     llmPtr->set_config(R"({
-        "async":false
+        "async":false,
+        "sampler_type":"greedy",
+        "ignore_eos":true
     })");
     // "Set reuse_kv=false for multiple test runs.
     // Otherwise, mContext->history_tokens retains data after the first run, skewing true prefill performance metrics."
@@ -1168,6 +1183,91 @@ static void tuning_prepare(Llm* llm) {
     llm->tuning(OP_ENCODER_NUMBER, {1, 5, 10, 20, 30, 50, 100});
 }
 
+static bool validSample(const LlmContext* context, int promptTokens, int decodeTokens) {
+    const auto status = context->status;
+    if (status == LlmStatus::NOT_LOADED || status == LlmStatus::INTERNAL_ERROR ||
+        status == LlmStatus::TIMEOUT || status == LlmStatus::USER_CANCEL ||
+        (promptTokens > 0 && context->prefill_us <= 0) ||
+        (decodeTokens > 0 && (status == LlmStatus::NORMAL_FINISHED || context->decode_us <= 0))) {
+        MNN_ERROR("[llm_bench] Incomplete sample: status=%d, generated=%d, requested=%d, "
+                  "prefill_us=%lld, decode_us=%lld\n", static_cast<int>(status), context->gen_seq_len,
+                  decodeTokens, (long long)context->prefill_us, (long long)context->decode_us);
+        return false;
+    }
+    return true;
+}
+
+// Shapes describe the first measured call, not subsequent KV growth.
+struct BenchProfile {
+    using Clock = std::chrono::steady_clock;
+    struct Record {
+        std::string inputs, outputs;
+        int64_t calls = 0;
+        double totalUs = 0.0;
+    };
+    bool active = false;
+    Record* current = nullptr;
+    Clock::time_point start;
+    std::map<std::pair<std::string, std::string>, Record> records[2]; // prefill / decode, type + name
+
+    static std::string shapes(const std::vector<MNN::Tensor*>& tensors) {
+        std::string result;
+        for (auto tensor : tensors) {
+            if (!result.empty()) result += ";";
+            result += tensor ? "[" + join(tensor->shape(), ",") + "]" : "null";
+        }
+        return result.empty() ? "-" : result;
+    }
+    static std::string tsv(std::string text) {
+        for (auto& c : text) {
+            if (c == '\t' || c == '\r' || c == '\n') c = ' ';
+        }
+        return text;
+    }
+    void before(Llm* llm, const std::vector<MNN::Tensor*>& inputs, const MNN::OperatorInfo* info) {
+        if (!active) return;
+        // generate_init resets to zero; AR increments before every decode forward (including the first).
+        auto& record = records[llm->getContext()->gen_seq_len > 0][{info->type(), info->name()}];
+        current = &record;
+        if (record.calls == 0) record.inputs = shapes(inputs);
+        start = Clock::now(); // All phase/name/type/input metadata lookup is outside the timed interval.
+    }
+    void after(const std::vector<MNN::Tensor*>& outputs) {
+        if (!active) return;
+        for (auto o : outputs) {
+            o->wait(MNN::Tensor::MAP_TENSOR_READ, true);
+        }
+        const auto end = Clock::now();
+        current->totalUs += std::chrono::duration<double, std::micro>(end - start).count();
+        if (current->calls == 0) current->outputs = shapes(outputs);
+        ++current->calls;
+    }
+    void print(FILE* out) const {
+        const bool byName = std::getenv("MNN_LLM_BENCH_PROFILE_NAME") != nullptr;
+        fprintf(out, "PROF\tphase\ttype\tname\tinputs\toutputs\tcalls\ttotal_us\n");
+        for (int phase = 0; phase < 2; ++phase) {
+            const char* label = phase ? "decode" : "prefill";
+            std::map<std::string, Record> byType;
+            for (const auto& entry : records[phase]) {
+                const auto& record = entry.second;
+                auto& total = byType[entry.first.first];
+                total.calls += record.calls;
+                total.totalUs += record.totalUs;
+                if (byName) {
+                    fprintf(out, "PROF\t%s\t%s\t%s\t%s\t%s\t%lld\t%.3f\n", label,
+                            tsv(entry.first.first).c_str(), tsv(entry.first.second).c_str(), record.inputs.c_str(),
+                            record.outputs.c_str(), (long long)record.calls, record.totalUs);
+                }
+            }
+            // '*' marks type totals, not another named operator.
+            for (const auto& entry : byType) {
+                fprintf(out, "PROF\t%s\t%s\t*\t-\t-\t%lld\t%.3f\n", label, tsv(entry.first).c_str(),
+                        (long long)entry.second.calls, entry.second.totalUs);
+            }
+        }
+    }
+};
+
 int main(int argc, char ** argv) {
     RuntimeParameters runtimeParams;
     TestParameters testParams;
@@ -1223,21 +1323,18 @@ int main(int argc, char ** argv) {
         auto executor = MNN::Express::Executor::newExecutor(forwardType, backendConfig, 1);
         MNN::Express::ExecutorScope scope(executor);
 
+        BenchProfile profile;
         auto llmPtr = buildLLM(instance.mCmdParam.model, instance.mCmdParam.backend, instance.mCmdParam.memory, instance.mCmdParam.precision, instance.mCmdParam.threads, instance.mCmdParam.power, instance.mCmdParam.dynamicOption, instance.mCmdParam.useMmap, instance.mCmdParam.divisionRatioSme2Neon, instance.mCmdParam.nPrompt, instance.mCmdParam.quantKv, instance.mCmdParam.flashAttention);
         std::unique_ptr<Llm> llm(llmPtr);
         if (enableProfile) {
             llm->set_config(R"({"enable_debug":true})");
-            auto profiler = MNN::Profiler::getInstance();
             llm->setDebugCallback(
-                [profiler](const std::vector<MNN::Tensor*>& inputs, const MNN::OperatorInfo* info) {
-                    profiler->start(info);
+                [&profile, llmPtr](const std::vector<MNN::Tensor*>& inputs, const MNN::OperatorInfo* info) {
+                    profile.before(llmPtr, inputs, info);
                     return true;
                 },
-                [profiler](const std::vector<MNN::Tensor*>& outputs, const MNN::OperatorInfo* info) {
-                    for (auto o : outputs) {
-                        o->wait(MNN::Tensor::MAP_TENSOR_READ, true);
-                    }
-                    profiler->end(info);
+                [&profile](const std::vector<MNN::Tensor*>& outputs, const MNN::OperatorInfo*) {
+                    profile.after(outputs);
                     return true;
                 }
             );
@@ -1270,21 +1367,25 @@ int main(int argc, char ** argv) {
             std::vector<int> tokens(prompt_tokens, 16);
 
             for (int i = 0; i < instance.mCmdParam.nRepeat + 1; ++i) {
+                profile.active = enableProfile && i > 0;
                 // switchMode handles OpenCL record queue: off for prefill, on for decode
                 if (isOpenCL) {
                     llm->switchMode(Llm::Prefill);
                 }
+                Timer wallCost;
                 llm->response(tokens, nullptr, nullptr, decodeTokens);
+                int64_t wallUs = wallCost.durationInUs();
+                profile.active = false;
+                if (!validSample(context, prompt_tokens, decodeTokens)) {
+                    return 1;
+                }
                 auto prefillTime = context->prefill_us;
                 auto decodeTime = context->decode_us;
                 if (i > 0) { // Exclude the first performance value.
                     t.prefillUs.push_back(prefillTime);
                     t.decodeUs.push_back(decodeTime);
-                    if (llm->stoped()) {
-                        t.nGenerates.push_back(context->gen_seq_len - 1);
-                    } else {
-                        t.nGenerates.push_back(context->gen_seq_len);
-                    }
+                    t.decodeWallUs.push_back(std::max<int64_t>(wallUs - prefillTime, 1));
+                    t.nGenerates.push_back(context->gen_seq_len);
                 }
             }
             if (printHeader) {
@@ -1292,6 +1393,11 @@ int main(int argc, char ** argv) {
                 printHeader = false;
             }
             printer_->printPerformance(t);
+            if (!t.decodeWallUs.empty()) {
+                auto wallSpeed = t.getTokensPerSecond(t.nGenerates, t.decodeWallUs);
+                fprintf(outfile, "decode wall speed (incl. sampling): %.2f ± %.2f tok/s\n", t.getAvgUs(wallSpeed),
+                        t.getStdevUs(wallSpeed));
+            }
             // Cool
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
@@ -1303,41 +1409,31 @@ int main(int argc, char ** argv) {
             std::vector<int> tokens1(1, tok);
 
             for (int i = 0; i < instance.mCmdParam.nRepeat + 1; ++i) {
+                profile.active = enableProfile && i > 0;
                 int64_t sampler_us = 0;
                 if (prompt_tokens) {
                     // Disable record queue during prefill for OpenCL
                     if (isOpenCL) {
                         llm->switchMode(Llm::Prefill);
                     }
-                    Timer prefillCost;
-                    llm->response(tokens, nullptr, nullptr, decodeTokens > 0 ? 1 : 0);
-                    int64_t prefill_us = context->prefill_us;
-                    if (prefill_us <= 0) {
-                        prefill_us = static_cast<int64_t>(prefillCost.durationInUs());
+                    llm->response(tokens, nullptr, nullptr, 0);
+                    if (!validSample(context, prompt_tokens, 0)) {
+                        return 1;
                     }
-                    sampler_us += prefill_us;
+                    sampler_us += context->prefill_us;
                 }
                 if (decodeTokens) {
                     // Enable record queue during decode for OpenCL
                     if (isOpenCL) {
                         llm->switchMode(Llm::Decode);
                     }
-                    Timer decodeCost;
                     llm->response(tokens1, nullptr, nullptr, decodeTokens);
-                    int64_t decode_us = context->decode_us;
-                    if (decode_us <= 0) {
-                        decode_us = static_cast<int64_t>(decodeCost.durationInUs());
-                        int64_t generatedTokens = context->gen_seq_len;
-                        if (llm->stoped() && generatedTokens > 0) {
-                            generatedTokens -= 1;
-                        }
-                        generatedTokens = std::max<int64_t>(generatedTokens, 1);
-                        if (generatedTokens < decodeTokens) {
-                            decode_us = (decode_us * decodeTokens + generatedTokens - 1) / generatedTokens;
-                        }
+                    if (!validSample(context, 0, decodeTokens)) {
+                        return 1;
                     }
-                    sampler_us += decode_us;
+                    sampler_us += context->decode_us;
                 }
+                profile.active = false;
                 if (i > 0) {
                     t.samplesUs.push_back(sampler_us);
                 }
@@ -1352,15 +1448,9 @@ int main(int argc, char ** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
         }
-    }
-
-    if (enableProfile) {
-        auto profiler = MNN::Profiler::getInstance();
-        fprintf(stdout, "\n========== Operator Profile Results ==========\n");
-        if (std::getenv("MNN_LLM_BENCH_PROFILE_NAME") != nullptr) {
-            profiler->printTimeByName(1);
+        if (enableProfile) {
+            profile.print(outfile);
         }
-        profiler->printTimeByType(1);
     }
 
     fprintf(stdout, "\n");

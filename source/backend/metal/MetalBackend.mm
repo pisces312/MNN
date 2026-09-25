@@ -21,6 +21,7 @@
 #if MNN_METAL_ENABLED
 #include <mutex>
 #include <chrono>
+#include <sched.h>
 #import "backend/metal/MNNMetalContext.h"
 #import "core/Macro.h"
 #import "core/TensorUtils.hpp"
@@ -485,6 +486,13 @@ public:
         mBuffer = buffer;
         mAllocator = allocator;
     }
+    MetalMemRelease(MemChunk buffer, std::shared_ptr<BufferAllocator> allocator) {
+        mBuffer = buffer;
+        mAllocator = allocator.get();
+        // Keep runtime-owned static allocator alive: STATIC mem objects can outlive
+        // the MetalRuntime when user code still holds output VARPs after releasing the module.
+        mHoldAllocator = std::move(allocator);
+    }
     virtual ~ MetalMemRelease() {
         mAllocator->free(mBuffer);
     }
@@ -494,6 +502,7 @@ public:
 private:
     MemChunk mBuffer;
     BufferAllocator* mAllocator;
+    std::shared_ptr<BufferAllocator> mHoldAllocator;
 };
 size_t MetalBackend::getTensorSizeInBytes(const Tensor* tensor) const {
     auto format = TensorUtils::getDescribe(tensor)->dimensionFormat;
@@ -539,6 +548,16 @@ size_t MetalBackend::getTensorSizeInBytes(const Tensor* tensor) const {
     return size;
 }
 
+void MetalBackend::aliasTensor(const Tensor* tensor, const Tensor* owner, size_t byteOffset) {
+    auto des = TensorUtils::getDescribeOrigin(tensor);
+    // Hand the tensor's own region back before re-pointing, so the pool can reuse
+    // it; nothing reads through this tensor's old address afterwards.
+    des->mem = nullptr;
+    _MetalApplyTensor((uint8_t*)owner->buffer().device,
+                      TensorUtils::getDescribeOrigin(owner)->offset + byteOffset,
+                      const_cast<Tensor*>(tensor));
+}
+
 Backend::MemObj* MetalBackend::onAcquire(const Tensor *_tensor, StorageType storageType) {
     auto tensor  = const_cast<Tensor *>(_tensor);
     size_t size = getTensorSizeInBytes(_tensor);
@@ -548,14 +567,16 @@ Backend::MemObj* MetalBackend::onAcquire(const Tensor *_tensor, StorageType stor
     // reuse if possible
     MemChunk buffer;
     BufferAllocator* allocator = nullptr;
+    std::shared_ptr<BufferAllocator> holdAllocator;
     switch (storageType) {
         case Backend::STATIC: {
-            buffer = mRuntime->mStaticAllocator->alloc(size, false);
-            allocator = mRuntime->mStaticAllocator.get();
+            holdAllocator = mRuntime->mStaticAllocator;
+            buffer = holdAllocator->alloc(size, false);
             if (nullptr == buffer.first && nullptr != mRuntime->mStaticAllocatorRaw.get()) {
-                buffer = mRuntime->mStaticAllocatorRaw->alloc(size, false);
-                allocator = mRuntime->mStaticAllocatorRaw.get();
+                holdAllocator = mRuntime->mStaticAllocatorRaw;
+                buffer = holdAllocator->alloc(size, false);
             }
+            allocator = holdAllocator.get();
         } break;
         case Backend::DYNAMIC: {
             buffer = mCurrentAllocator->alloc(size, false);
@@ -585,6 +606,9 @@ Backend::MemObj* MetalBackend::onAcquire(const Tensor *_tensor, StorageType stor
         _MetalApplyTensor((uint8_t*)(&mEmptyMem), 0, (Tensor*)_tensor);
     } else {
         _MetalApplyTensor((uint8_t*)buffer.first, buffer.second, (Tensor*)_tensor);
+    }
+    if (nullptr != holdAllocator) {
+        return new MetalMemRelease(buffer, holdAllocator);
     }
     return new MetalMemRelease(buffer, allocator);
 }
@@ -753,11 +777,13 @@ bool MetalBackend::isCmdBufferCommit() {
     }
 #endif
     auto ctx = (__bridge MNNMetalContext *)context();
-    
-    //TODO: set magic number
-    // Experiment: MNN_METAL_COMMIT_NUM overrides ops-per-commit cadence
+
+    constexpr int kMetalCommitNum = 30;
     const int sEnvCommitNum = MetalEnv::get().commitNum;
-    const int magicNum = sEnvCommitNum > 0 ? sEnvCommitNum : mRuntime->hint().encorderNumForCommit;
+    const auto& hint        = mRuntime->hint();
+    const int magicNum = sEnvCommitNum > 0
+                             ? sEnvCommitNum
+                             : (hint.encorderNumForCommit >= 0 ? hint.encorderNumForCommit : kMetalCommitNum);
     mEncoderCount++;
     if(mEncoderCount != 0 && mEncoderCount % magicNum == 0) {
         return true;
@@ -833,6 +859,13 @@ id<MTLBuffer> MetalBackend::getConstBuffer(size_t size) const {
     auto buffer  = [context newDeviceBuffer:size access:CPUReadWrite];
     return buffer;
 }
+// NOTE: this pool has no in-flight tracking (unlike acquireUploadStaging, which
+// gates reuse on slot.lastUse). A buffer handed back here can be popped and
+// rewritten by the very next getConstBuffer caller, so only return a buffer at
+// a point where our own GPU work is known to be drained -- op destruction, or
+// inside the resize window fenced by onResizeBegin. Long-lived per-op param
+// buffers (e.g. MetalConvolution1x1::mConstBuffer) deliberately never come back
+// here: they are allocated once and rewritten in place.
 void MetalBackend::returnConstBuffer(id<MTLBuffer> buffer) const {
     mHoldBuffers.push(buffer);
 }
@@ -1022,8 +1055,8 @@ void MetalBackend::onResizeBegin() {
     // OUR OWN in-flight GPU work to finish. The legacy wait() drained the
     // runtime's last commit — which for LLM decode belongs to another module's
     // backend (the per-token logits-slice submodule resize was draining the
-    // whole main graph, serializing CPU resize against GPU and costing ~14%
-    // decode on Qwen3-0.6B/M4 Pro). Note the legacy wait was not a true
+    // whole main graph, serializing CPU resize against GPU and costing real
+    // decode time). Note the legacy wait was not a true
     // cross-queue drain either: backends own separate queues and _waiting only
     // tracks the latest commit.
     //   MNN_METAL_RESIZE_WAIT=global  -> legacy behavior (rollback/A-B)
@@ -1033,6 +1066,17 @@ void MetalBackend::onResizeBegin() {
         wait(0);
     } else if (sResizeWaitMode == 0) {
         waitOwnInflight();
+    } else {
+        // No fence at all: ops that fill a persistent shared buffer during
+        // resize (every Conv1x1's Param, the fused-projection seg buffers, ...)
+        // now write memory the still-running previous command buffer may be
+        // reading. That corrupts results silently, so say so once.
+        static bool sWarned = false;
+        if (!sWarned) {
+            sWarned = true;
+            MNN_ERROR("[METAL] MNN_METAL_RESIZE_WAIT=none: resize fence disabled, "
+                      "op params may be overwritten while still in flight. Experiment only.\n");
+        }
     }
     mCurrentAllocator->reset();
     // Clear Gate/Up fusion mappings from previous resize
@@ -1045,6 +1089,15 @@ ErrorCode MetalBackend::onResizeEnd() {
     if (err != NO_ERROR) {
         return err;
     }
+    // Before setupFusion: the gate fold re-homes the linear-attention raw a/b
+    // inputs, which are also members of the fused linear_in projection group. Any
+    // onAcquireBuffer drops whatever home the tensor had, so whoever runs last
+    // decides the address -- and the fused group must win, because it bakes the
+    // member addresses into the single dispatch it encodes.
+    err = applyLinearAttnGateFolds();
+    if (err != NO_ERROR) {
+        return err;
+    }
     // Export-time fused projections wire up their own leader/follower dispatch
     // from the exported member order. Must run after compute(): the setup
     // re-homes follower outputs to STATIC, which only sticks once the dynamic
@@ -1052,7 +1105,7 @@ ErrorCode MetalBackend::onResizeEnd() {
     for (auto* host : mFusedProjs) {
         host->setupFusion();
     }
-    return applyLinearAttnGateFolds();
+    return NO_ERROR;
 }
 
 ErrorCode MetalBackend::applyLinearAttnGateFolds() {
@@ -1385,6 +1438,13 @@ void MetalBackend::onCopyBuffer(const Tensor *src, const Tensor *dst, id<MTLComp
     MNN_ASSERT(false); // should not be handled here
 }
 int MetalBackend::onSync(Tensor::MapType mtype, bool toCpu, const Tensor* dstTensor) {
+    // A prior command buffer completed with an error: its kernel writes were
+    // lost, so device memory no longer matches the recorded graph. Refuse the
+    // read rather than hand back garbage (Tensor::map turns NO_EXECUTION into
+    // a nullptr with a warning, which callers already handle).
+    if (mRuntime->mCommandBufferFailed) {
+        return NO_EXECUTION;
+    }
     if (mRuntime->pExecutionStatus == NO_EXECUTION) {
 #ifdef CHECK_IOS_UI_STATUS
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
@@ -1405,6 +1465,11 @@ int MetalBackend::onSync(Tensor::MapType mtype, bool toCpu, const Tensor* dstTen
     
     if (toCpu) {
         wait(3);
+    }
+    // The wait above may have surfaced a command buffer error; fail this read
+    // rather than letting the caller consume the lost writes.
+    if (mRuntime->mCommandBufferFailed) {
+        return NO_EXECUTION;
     }
     return 0;
 }
@@ -1542,6 +1607,10 @@ void MetalBackend::waitOwnInflight() const {
         if (mLastOwnCommandBuffer.status < MTLCommandBufferStatusCompleted) {
             [mLastOwnCommandBuffer waitUntilCompleted];
         }
+        if (mLastOwnCommandBuffer.error) {
+            MNN_ERROR("[METAL] command buffer error: %s\n", mLastOwnCommandBuffer.error.localizedDescription.UTF8String);
+            mRuntime->mCommandBufferFailed = true;
+        }
         mLastOwnCommandBuffer = nil;
     }
 }
@@ -1556,6 +1625,44 @@ void MetalBackend::wait(int traceSite) const {
         if (buffer.status >= MTLCommandBufferStatusCompleted) {
             if (buffer.error) {
                 MNN_ERROR("[METAL] command buffer error: %s\n", buffer.error.localizedDescription.UTF8String);
+                mRuntime->mCommandBufferFailed = true;
+            }
+            mRuntime->_waiting = nil;
+            return;
+        }
+        if (MetalEnv::get().spinWait) {
+            // Poll buffer.status instead of waitUntilCompleted: the blocking
+            // wait's completion-handler wake costs ~0.3ms per decode token on
+            // macOS. Spin with sched_yield so the observing thread notices
+            // completion within ~us; cap at ~20ms and fall back to the
+            // blocking wait for long-running buffers (e.g. prefill).
+#ifdef MNN_SESSION_CPU_TRACE
+            auto t0 = std::chrono::steady_clock::now();
+#endif
+            auto spinStart = std::chrono::steady_clock::now();
+            int spins = 0;
+            while (buffer.status < MTLCommandBufferStatusCompleted) {
+                sched_yield();
+                if ((++spins & 0xFFF) == 0) {
+                    auto dt = std::chrono::steady_clock::now() - spinStart;
+                    if (std::chrono::duration_cast<std::chrono::milliseconds>(dt).count() > 20) {
+                        [buffer waitUntilCompleted];
+                        break;
+                    }
+                }
+            }
+#ifdef MNN_SESSION_CPU_TRACE
+            auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+            metalCpuTrace().waitNs += ns;
+            metalCpuTrace().waitCalls += 1;
+            if (traceSite >= 0 && traceSite < 4) {
+                metalCpuTrace().waitSiteNs[traceSite] += ns;
+                metalCpuTrace().waitSiteCalls[traceSite] += 1;
+            }
+#endif
+            if (buffer.error) {
+                MNN_ERROR("[METAL] command buffer error: %s\n", buffer.error.localizedDescription.UTF8String);
+                mRuntime->mCommandBufferFailed = true;
             }
             mRuntime->_waiting = nil;
             return;
@@ -1592,6 +1699,7 @@ void MetalBackend::wait(int traceSite) const {
 
         if (buffer.error) {
             MNN_ERROR("[METAL] command buffer error: %s\n", buffer.error.localizedDescription.UTF8String);
+            mRuntime->mCommandBufferFailed = true;
         }
     }
     mRuntime->_waiting = nil;
@@ -1605,6 +1713,14 @@ id<MTLComputePipelineState> MetalBackend::makeComputePipelineWithSourceOption(co
     if (nil == pipeline) {
         mRuntime->pCurrentStatus = NOT_SUPPORT;
         MNN_ERROR("pipelineWithSourceOption error.\n");
+    } else if (MetalEnv::get().pipelineInfo) {
+        MNN_PRINT("[PipelineInfo] %s maxThreads=%lu execWidth=%lu smem=%lu macros=%s\n", cname,
+                  (unsigned long)pipeline.maxTotalThreadsPerThreadgroup,
+                  (unsigned long)pipeline.threadExecutionWidth,
+                  (unsigned long)pipeline.staticThreadgroupMemoryLength,
+                  options == nil ? "-" : [[options.preprocessorMacros description]
+                                             stringByReplacingOccurrencesOfString:@"\n"
+                                                                       withString:@" "].UTF8String);
     }
     return pipeline;
 }
@@ -1770,13 +1886,13 @@ MetalRuntime::MetalRuntime(void* context) {
                        [[[ctx device] name] containsString:@"M2"] || \
                        [[[ctx device] name] containsString:@"M3"];
     mPreferInShaderPrefillDequant = mSimdGroupMatrix && !isOldMacGpu;
-    // M64 outer-dequant GEMM tile tier, MLX-style arch parse (family API can't
-    // tell M3 from M4 -- both MTLGPUFamilyApple9). architecture.name is
-    // "applegpu_g<gen><size>" (g13=M1 .. g16=M4/A18, size: p=phone, g=base/pro,
-    // s=max, d=ultra). M4-class Macs (gen >= 16, non-phone) take the 64x64 tile:
-    // M4 Pro paired rep5x2 pp2048 +1.1~2.4%, pp512 neutral. M3 Pro pp512 -1.4%
-    // keeps gen <= 15 off; phones ('p') stay off pending calibration. Older OS
-    // exposes no architecture -> off (conservative).
+    // M64 outer-dequant GEMM tile tier, resolved from the GPU architecture name
+    // (the family API cannot distinguish M3 from M4). architecture.name is
+    // "applegpu_g<gen><size>"; M4 Pro is verified as "applegpu_g16s". M4-class
+    // Macs (gen >= 16, non-phone) take the M64 tile. The high-bandwidth heuristic
+    // below is deliberately limited to the verified 's' tier; other size letters
+    // remain on the conservative decode-SDPA defaults pending measurement.
+    // Older OS versions without architecture metadata remain off.
     if (@available(iOS 17.0, macOS 14.0, *)) {
         const char* archName = [[[[ctx device] architecture] name] UTF8String];
         const char* kPrefix = "applegpu_g";
@@ -1785,6 +1901,17 @@ MetalRuntime::MetalRuntime(void* context) {
             int gen = atoi(p);
             char size = archName[strlen(archName) - 1];
             mPreferM64Gemm = mSimdGroupMatrix && gen >= 16 && size != 'p';
+            // High-bandwidth M4 tier. Measured on M4 Pro: architecture.name is
+            // "applegpu_g16s", i.e. 's' is the Pro letter (the size map in the
+            // comment above was written as s=max / g=base+pro, which that
+            // measurement contradicts). Gated to exactly the verified point
+            // rather than extended to 'c'/'d' (Max/Ultra, unmeasured), because
+            // the two failure modes are asymmetric: a false positive widens the
+            // decode-SDPA threadgroup product on an M4 base GPU and regresses it
+            // (product 256 measured optimal there), while a false negative only
+            // leaves a Max/Ultra on the narrower tier -- a missed gain, no
+            // regression. Widen this once Max/Ultra are actually swept.
+            mHighBandwidthM4 = mSimdGroupMatrix && gen >= 16 && size == 's';
         }
     }
 //    MNN_PRINT("Metal device name %s, open tensor: %d\n\n", [[[ctx device] name] UTF8String], mTensorOps);

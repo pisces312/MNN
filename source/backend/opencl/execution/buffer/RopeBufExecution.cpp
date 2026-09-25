@@ -15,6 +15,13 @@
 namespace MNN {
 namespace OpenCL {
 
+// Measured winners for rope_buf; handing them to the tuner keeps Wide from sweeping the full grid.
+static LwsShortlist ropeLwsShortlist(GpuType gpuType) {
+    static const uint32_t adrenoPool[][3] = {{4, 2, 16}, {1, 2, 8}, {1, 1, 2}, {2, 1, 1}, {4, 1, 2}};
+    static const uint32_t maliPool[][3] = {{4, 1, 4}, {4, 16, 16}, {1, 1, 2}};
+    return makeLwsShortlist(gpuType, adrenoPool, maliPool);
+}
+
 static std::shared_ptr<cl::Buffer> makeRopeNormGamma(OpenCLBackend* backend, const LayerNorm* layerNorm) {
     if (nullptr == layerNorm || nullptr == layerNorm->gamma()) {
         return nullptr;
@@ -53,6 +60,18 @@ static bool validRopeC4Input(const Tensor* q, const Tensor* k, int numHead, int 
     return q->length(1) == numHead * headDim && k->length(1) == kvNumHead * headDim;
 }
 
+static std::set<std::string> ropeBuildOptions(const std::shared_ptr<cl::Buffer>& qGamma,
+                                              const std::shared_ptr<cl::Buffer>& kGamma) {
+    std::set<std::string> buildOptions;
+    if (qGamma) {
+        buildOptions.emplace("-DQ_NORM");
+    }
+    if (kGamma) {
+        buildOptions.emplace("-DK_NORM");
+    }
+    return buildOptions;
+}
+
 RopeBufExecution::RopeBufExecution(const MNN::Op* op, Backend* backend) : CommonExecution(backend, op) {
     mOpenCLBackend = static_cast<OpenCLBackend*>(backend);
 
@@ -88,6 +107,13 @@ RopeBufExecution::RopeBufExecution(const MNN::Op* op, Backend* backend, int rope
       mQEps(qEps),
       mKEps(kEps) {
     mOpenCLBackend = static_cast<OpenCLBackend*>(backend);
+    prebuildOpenCLPrograms({}, {});
+}
+
+void RopeBufExecution::prebuildOpenCLPrograms(const std::vector<Tensor*>&, const std::vector<Tensor*>&) {
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    runtime->submitPrebuild("rope_buf", ropeBuildOptions(mQGamma, mKGamma), mOpenCLBackend->getPrecision(), nullptr,
+                            nullptr, true, true);
 }
 
 bool RopeBufExecution::onClone(Backend* bn, const Op* op, Execution** dst) {
@@ -133,19 +159,29 @@ ErrorCode RopeBufExecution::onEncode(const std::vector<Tensor*>& inputs, const s
 
     auto runtime = mOpenCLBackend->getOpenCLRuntime();
 
-    std::set<std::string> buildOptions;
-    if (mQGamma) {
-        buildOptions.emplace("-DQ_NORM");
+    // The norm kernel used to run one work-item per (token, head), which
+    // leaves decode (outerSize==1) with only fullHead lanes on the GPU.
+    // Split the head dimension when the grid is small; prefill keeps the
+    // old shape so the split machinery costs nothing there.
+    int normSplit = 1;
+    if ((mQGamma || mKGamma) && outerSize * fullHead < 2048) {
+        // Upper bound of the head-dim split; must stay <= NORM_SPLIT_MAX in
+        // rope_buf.cl (the sNorm local-memory capacity).
+        static constexpr int kRopeNormSplitMax = 16;
+        normSplit = std::min(kRopeNormSplitMax, std::max(ropeHalfD, 1));
     }
-    if (mKGamma) {
-        buildOptions.emplace("-DK_NORM");
+
+    auto buildOptions = ropeBuildOptions(mQGamma, mKGamma);
+    if (normSplit > 1) {
+        buildOptions.emplace("-DNORM_SPLIT_REDUCE");
     }
     unit.kernel = runtime->buildKernel("rope_buf", "rope_buf", buildOptions, mOpenCLBackend->getPrecision());
     OPENCL_CHECK_KERNEL(unit.kernel);
     mMaxWorkGroupSize = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(unit.kernel));
 
     if (mQGamma || mKGamma) {
-        mGlobalWorkSize = {1, static_cast<uint32_t>(outerSize), static_cast<uint32_t>(fullHead)};
+        mGlobalWorkSize = {static_cast<uint32_t>(normSplit), static_cast<uint32_t>(outerSize),
+                           static_cast<uint32_t>(fullHead)};
     } else {
         mGlobalWorkSize = {static_cast<uint32_t>(workDim), static_cast<uint32_t>(outerSize),
                            static_cast<uint32_t>(fullHead)};
@@ -178,9 +214,16 @@ ErrorCode RopeBufExecution::onEncode(const std::vector<Tensor*>& inputs, const s
     }
     MNN_CHECK_CL_SUCCESS(ret, "setArg RopeBufExecution");
 
-    mLocalWorkSize = localWS3DDefault(mGlobalWorkSize, mMaxWorkGroupSize, runtime, "rope_buf", unit.kernel,
-                                      mOpenCLBackend->getCLTuneLevel(), "rope_buf")
-                         .first;
+    if (normSplit > 1) {
+        // NORM_SPLIT_REDUCE needs every split of one head inside a single
+        // workgroup: pin LWS.x to the split count instead of tuning it.
+        mLocalWorkSize = {static_cast<uint32_t>(normSplit), 1, 1};
+    } else {
+        mLocalWorkSize =
+            localWS3DDefault(mGlobalWorkSize, mMaxWorkGroupSize, runtime, "rope_buf", unit.kernel,
+                             mOpenCLBackend->getCLTuneLevel(), "rope_buf", ropeLwsShortlist(runtime->getGpuType()))
+                .first;
+    }
 
     mOpenCLBackend->recordKernel3d(unit.kernel, mGlobalWorkSize, mLocalWorkSize);
 

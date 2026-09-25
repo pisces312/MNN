@@ -49,6 +49,8 @@ static MNNForwardType backend_type_convert(const std::string& type_str) {
         return MNN_FORWARD_VULKAN;
     if (type_str == "hexagon")
         return MNN_FORWARD_HEXAGON;
+    if (type_str == "qnn")
+        return MNN_FORWARD_QNN;
     if (type_str == "npu")
         return MNN_FORWARD_NN;
     return MNN_FORWARD_AUTO;
@@ -298,7 +300,19 @@ void Llm::setSpeculativeConfig() {
             mInSpec = false;
             return;
         }
-        mDraftLength = mConfig->draft_predict_length();
+        if (specultive_type == "dflash") {
+            // DFlash verifies a full dflash_block_size block; pool/mask/tuning
+            // key off (mDraftLength+1, all_logits), so this must be block-1.
+            int block = mConfig->dflash_block_size();
+            mDraftLength = block > 1 ? block - 1 : 1;
+            if (mConfig->config_.contains("draft_predict_length") &&
+                mConfig->draft_predict_length() != mDraftLength) {
+                MNN_PRINT("Warning: draft_predict_length is ignored for DFlash; "
+                          "verify length is dflash_block_size=%d.\n", block);
+            }
+        } else {
+            mDraftLength = mConfig->draft_predict_length();
+        }
         mInSpec = true;
     }
 }
@@ -373,7 +387,8 @@ bool Llm::load() {
     mSampler.reset(Sampler::createSampler(mContext, mConfig));
     // 3. load model
     Module::Config module_config;
-    if (mConfig->backend_type() == "opencl" || mConfig->backend_type() == "vulkan" || mConfig->backend_type() == "npu") {
+    if (mConfig->backend_type() == "opencl" || mConfig->backend_type() == "vulkan" ||
+        mConfig->backend_type() == "npu" || mConfig->backend_type() == "qnn") {
         module_config.shapeMutable = false;
     } else {
         module_config.shapeMutable = true;
@@ -478,6 +493,10 @@ bool Llm::load() {
     }
     mContext->load_us += _t.durationInUs();
     mContext->status = LlmStatus::RUNNING;  // Set status to RUNNING after successful load
+    // init deepstack placeholder for visual models, same as Omni::load
+    if (mConfig->has_deepstack()) {
+        mDeepstackInput = Express::_Fill(_var<int>({3, 1, 1}, {3}), _Scalar<float>(0.0));
+    }
     return true;
 }
 
@@ -518,29 +537,42 @@ void Llm::tuning(TuneType type, std::vector<int> candidates) {
         int verify_length = mDraftLength + 1;
         decode_seq = verify_length;
     }
+    // Tag the tuning forwards like a real verify block, or they measure another path.
+    const bool tuneSpecBlock = mInSpec && decode_seq > 1 && nullptr != mGenerationStrategy &&
+                               mGenerationStrategy->marksSpecBlock();
     int64_t min_time     = INT64_MAX;
     int prefer_candidate = 10;
     for (auto& candidate : candidates) {
         mRuntimeManager->setHint(MNN::Interpreter::OP_ENCODER_NUMBER_FOR_COMMIT, candidate);
-        Timer _t;
-        std::vector<int> input_ids(decode_seq, 0);
-        auto outputs = forwardVec(input_ids);
-        if(outputs.empty()) {
-            return;
+        // Perf noise is additive-positive, so min-of-reps is the robust pick.
+        int64_t candidate_time = INT64_MAX;
+        for (int rep = 0; rep < 3; ++rep) {
+            Timer _t;
+            std::vector<int> input_ids(decode_seq, 0);
+            if (tuneSpecBlock) {
+                mMeta->spec_block = decode_seq;
+            }
+            auto outputs = forwardVec(input_ids);
+            mMeta->spec_block = 0; // before any early return: a stale tag breaks the next prefill
+            if(outputs.empty()) {
+                return;
+            }
+            auto logits = outputs[0];
+            if (nullptr == logits.get()) {
+                return;
+            }
+            if (logits->getInfo()->size == 0) {
+                return;
+            }
+            auto token   = sample(logits);
+            auto rep_time = _t.durationInUs();
+            if (rep_time < candidate_time) {
+                candidate_time = rep_time;
+            }
         }
-        auto logits = outputs[0];
-        if (nullptr == logits.get()) {
-            return;
-        }
-        if (logits->getInfo()->size == 0) {
-            return;
-        }
-        auto token   = sample(logits);
-        auto time = _t.durationInUs();
-        if (time < min_time) {
+        if (candidate_time < min_time) {
             prefer_candidate = candidate;
-            min_time         = time;
-            // MNN_PRINT("op encode number:%d, decode time: %lld us\n", candidate, time);
+            min_time         = candidate_time;
         }
     }
     mRuntimeManager->setHint(MNN::Interpreter::OP_ENCODER_NUMBER_FOR_COMMIT, prefer_candidate);
@@ -608,6 +640,10 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
     mGenerateParam->validLogitSize = 0;
     mGenerateParam->validLogitStart = 0;
     std::vector<Express::VARP> inputs {hiddenState, mask, inputPos, logitsIndex};
+    // deepstack arg for visual models; when Omni has not supplied via mExtraArgs, add here
+    if (mConfig->has_deepstack() && mDeepstackInput.get() && extraArgs.empty()) {
+        extraArgs.push_back(mDeepstackInput);
+    }
     inputs.insert(inputs.end(), extraArgs.begin(), extraArgs.end());
     std::vector<Express::VARP> outputs = selectModule->onForward(inputs);
 
@@ -832,7 +868,13 @@ int Llm::sample(VARP logits, int offset, int size) {
     auto logitsShape = logits->getInfo()->dim;
     if (offset && size) {
         MNN_ASSERT(logits->getInfo()->size >= offset + size);
-        logits = _Const(logits->readMap<float>() + offset, {size}, NHWC, halide_type_of<float>());
+        auto logitsPtr = logits->readMap<float>();
+        if (nullptr == logitsPtr) {
+            MNN_ERROR("[LLM] sample: logits read failed, backend execution stopped\n");
+            mContext->status = LlmStatus::INTERNAL_ERROR;
+            return -1;
+        }
+        logits = _Const(logitsPtr + offset, {size}, NHWC, halide_type_of<float>());
     }
     auto token_id = mSampler->sample(logits);
     return token_id;
@@ -1371,7 +1413,7 @@ bool Llm::setPrefixCacheFile(const std::string& filename, int flag) {
     mPrefixCacheFileName = filename;
     mCallIndex = 0;
     mPrefixCacheMode = true;
-
+    ++mMeta->prefix_session_id;
 
     mIsPrefixFileExist = true;
     // check kvcache, validate file existence
@@ -1599,11 +1641,17 @@ VARP Llm::gen_attention_mask(int seq_len) {
         }
 
         // Mask: lower triangular
-       if ((mConfig->backend_type() == "cpu" || mConfig->backend_type() == "hexagon" || mConfig->backend_type() == "metal") && mValidBlockSize.empty()) {
-           attentionMask = _Input({}, NCHW, halide_type_of<float>());
-           auto ptr = attentionMask->writeMap<float>();
-           ptr[0] = 0;
-       } else {
+        // Backends whose Attention op derives the causal mask itself take a scalar
+        // sentinel instead of an O(seqLen * kvLen) mask: it saves the host-side build
+        // plus the upload, and lets the kernel skip fully-masked kv blocks.
+        const std::string backendType = mConfig->backend_type();
+        const bool causalSentinel =
+            backendType == "cpu" || backendType == "hexagon" || backendType == "metal" || backendType == "opencl";
+        if (causalSentinel && mValidBlockSize.empty()) {
+            attentionMask = _Input({}, NCHW, halide_type_of<float>());
+            auto ptr = attentionMask->writeMap<float>();
+            ptr[0] = 0;
+        } else {
             attentionMask = _Input({1, 1, seq_len, kv_seq_len}, NCHW, halide_type_of<float>());
             auto ptr = attentionMask->writeMap<float>();
             for (int i = 0; i < seq_len; i++) {
@@ -1611,7 +1659,7 @@ VARP Llm::gen_attention_mask(int seq_len) {
                     ptr[kv_seq_len * i + j] = (j > i) * std::numeric_limits<float>::lowest();
                 }
             }
-       }
+        }
         return attentionMask;
     } else {
         if (needNewVar(attentionMask, 2, seq_len, kv_seq_len)) {
@@ -1719,7 +1767,7 @@ VARP Llm::gen_position_ids(int seq_len) {
 
 bool Llm::is_stop(int token_id) {
     CHECK_LLM_RUNNING_RET(mContext, true);
-    bool stop = mTokenizer->is_stop(token_id);
+    bool stop = !mConfig->ignore_eos() && mTokenizer->is_stop(token_id);
     if (stop) {
         mContext->status = LlmStatus::NORMAL_FINISHED;
     }

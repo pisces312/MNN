@@ -20,6 +20,7 @@ description: MNN OpenCL 后端 kernel 性能优化与新特性集成。覆盖 be
 7. **单点突破，迭代验证**。每次只改一个优化点，验证正确性和性能后再进行下一个。
 8. **新特性必须有示例代码 + fallback**。集成 OpenCL 新特性（扩展、vendor extension、新指令等）时：(1) **必须要求用户提供可运行的示例代码**——不同 GPU 厂商对同一扩展行为可能不同，别凭文档猜；(2) **必须保留原有路径作为 fallback**，通过 runtime 特性检测分发，确保不支持的设备功能不受影响。
 9. **单测必须确认实际执行了目标内存模式**。只有 Buffer Execution 的算子，仅指定 `backend=3` 仍可能走 Image 模式并回退 CPU，形成假通过。测试时显式设置 Buffer mode（例如 `run_test.out <case> 3 2 68`），并用 profiler、后端日志或明显的 GPU 同步耗时确认没有 fallback。
+10. **名字必须等于真实物理量**。改任何算子 / kernel 代码时，先核对沿途变量、字段、宏名是否就是它实际装的那个量（不只是自己新加的名字）：`blockSize` 到底是"块内元素数"还是"每行块数"、分档判据的自变量是"head 数"还是 dispatch 的 workgroup 数。名字骗人不会报错——编译、对拍、单测都过，但基于它写的分档、阈值、门控会一起错。名字与实际索引算术不符就改名，并全仓确认零残留。
 
 ---
 
@@ -400,6 +401,8 @@ adb shell "cd /data/local/tmp/MNN && rm -rf tmp/mnn_cachefile.bin; LD_LIBRARY_PA
 **正确姿势——交替 A/B**：保留 base 和 opt 两份二进制，`base→opt→base→opt` 背靠背配对推送+运行，丢弃冷启动首轮，看**每轮配对**里 opt 是否稳定胜出（例如 5/5 轮都赢才算数），而不是比两组的绝对值。
 
 **注意换库会抖乱 tune cache**：base 和 opt 若是不同 kernel（如 gemm_b4 vs gemm_b8），每次切库都可能触发重调优，测出的是重调优开销而非稳态（症状：数字异常低且每轮都低）。规避：要么 A/B 前让 cache 把两套 kernel 都 warm 稳定，要么改用"每个库连续多跑取稳态、两块背靠背"的方式（牺牲一点热隔离换 cache 稳定）。
+
+**更隐蔽的一层：cache 条目会跨 shape 复用 lws**，所以连"跑的顺序"都会改结果 —— 先跑短 shape 再跑长 shape 和直接跑长 shape，实测能差 2x（见 `optimization-handbook.md` **陷阱 R**）。**每个变体给一个独立 cache 目录**：`llm_bench` 写的是 **cwd 相对**的 `tmp/mnn_cachefile.bin`，把二进制各复制一份到独立目录、`cd` 进去跑即可隔离。
 
 用带 `MNN_GPU_TIME_PROFILE=ON` 的 build 只能看 kernel 相对占比（它把绝对耗时放大 ~30×，且按 op 名而非 cl kernel 名聚合）；**最终收益以不带 profile 的干净 build 的端到端 tok/s 为准**。
 

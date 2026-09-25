@@ -4,6 +4,9 @@
 #include <numeric>
 #include <unordered_map>
 #include <limits>
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 #include <MNN/AutoTime.hpp>
 #include <MNN/expr/Executor.hpp>
@@ -48,6 +51,67 @@ static std::unordered_map<int, int> buildIndexMap(const SamplerState& state) {
         }
     }
     return map;
+}
+
+// Exact top-k by value (descending; lower index wins ties) over host logits.
+// Threshold-scan: the fast path only compares each 16-wide block's max against
+// the running k-th value; sorted insertion happens only for the rare element
+// that beats it. The previous Express::_TopKV2 form ran the generic CPU TopKV2
+// op at ~350-500us/token (vocab=151936, k=40, M4 Pro) even though the logits
+// are already host-resident by sample time; this scan costs ~20-30us.
+static void topKSubset(const float* x, int n, int k, std::vector<float>& vals, std::vector<int>& idxs) {
+    vals.resize(k);
+    idxs.resize(k);
+    for (int i = 0; i < k; ++i) {
+        float v = x[i];
+        int j = i;
+        while (j > 0 && vals[j - 1] < v) {
+            vals[j] = vals[j - 1];
+            idxs[j] = idxs[j - 1];
+            --j;
+        }
+        vals[j] = v;
+        idxs[j] = i;
+    }
+    float threshold = vals[k - 1];
+    int i = k;
+#if defined(__aarch64__)
+    for (; i + 16 <= n; i += 16) {
+        float32x4_t m0 = vmaxq_f32(vld1q_f32(x + i), vld1q_f32(x + i + 4));
+        float32x4_t m1 = vmaxq_f32(vld1q_f32(x + i + 8), vld1q_f32(x + i + 12));
+        if (vmaxvq_f32(vmaxq_f32(m0, m1)) <= threshold) {
+            continue;
+        }
+        for (int u = 0; u < 16; ++u) {
+            float v = x[i + u];
+            if (v > threshold) {
+                int j = k - 1;
+                while (j > 0 && vals[j - 1] < v) {
+                    vals[j] = vals[j - 1];
+                    idxs[j] = idxs[j - 1];
+                    --j;
+                }
+                vals[j] = v;
+                idxs[j] = i + u;
+                threshold = vals[k - 1];
+            }
+        }
+    }
+#endif
+    for (; i < n; ++i) {
+        float v = x[i];
+        if (v > threshold) {
+            int j = k - 1;
+            while (j > 0 && vals[j - 1] < v) {
+                vals[j] = vals[j - 1];
+                idxs[j] = idxs[j - 1];
+                --j;
+            }
+            vals[j] = v;
+            idxs[j] = i;
+            threshold = vals[k - 1];
+        }
+    }
 }
 
 // SamplerConfig methods
@@ -122,12 +186,31 @@ void Sampler::SamplerConfig::configPenalty(std::shared_ptr<LlmConfig> llmConfig)
     select_type = sampler;
 }
 
+bool Sampler::SamplerConfig::isPenaltyActive() const {
+    // Mirror what stepPenalty actually applies (the "heavier penalty"
+    // direction): repetition_penalty scales logits only when > 1 (its apply
+    // guard skips <= 1), presence / frequency subtract only when positive, and
+    // the n-gram term fires only when ngram_factor > 1. Any other value is a
+    // no-op in stepPenalty, so it does not count as active here.
+    return repetition_penalty > 1.0f || presence_penalty > 0.0f ||
+           frequency_penalty > 0.0f || ngram_factor > 1.0f;
+}
+
 void Sampler::SamplerConfig::configMixed(std::shared_ptr<LlmConfig> llmConfig) {
     mixedSamplers = llmConfig->mixed_samplers();
     for (const auto& samplerName : mixedSamplers) {
         configSampler(samplerName, llmConfig);
     }
-    // move penalty to front if present
+    // Load penalty fields via configPenalty so the field list lives in one
+    // place (adding a new penalty knob later can't drift between here and
+    // configPenalty). Its select_type write is recomputed at the end below.
+    // logit_bias / banned_tokens are mixed-only, so load them here.
+    configPenalty(llmConfig);
+    logit_bias = llmConfig->logit_bias();
+    banned_tokens = llmConfig->banned_tokens();
+    // move penalty to front if present; also auto-enable it when a penalty is
+    // configured but "penalty" was left out of mixed_samplers (the default list
+    // omits it), so an active penalty takes effect regardless of the list.
     std::vector<std::string> newSamplers;
     bool hasPenalty = false;
     for (const auto& s : mixedSamplers) {
@@ -137,7 +220,7 @@ void Sampler::SamplerConfig::configMixed(std::shared_ptr<LlmConfig> llmConfig) {
             hasPenalty = true;
         }
     }
-    if (hasPenalty) {
+    if (hasPenalty || isPenaltyActive()) {
         newSamplers.insert(newSamplers.begin(), "penalty");
     }
     mixedSamplers = std::move(newSamplers);
@@ -147,13 +230,6 @@ void Sampler::SamplerConfig::configMixed(std::shared_ptr<LlmConfig> llmConfig) {
     } else {
         select_type = "temperature";
     }
-    // load new config fields
-    logit_bias = llmConfig->logit_bias();
-    banned_tokens = llmConfig->banned_tokens();
-    repetition_penalty = llmConfig->repetition_penalty();
-    presence_penalty = llmConfig->presence_penalty();
-    frequency_penalty = llmConfig->frequency_penalty();
-    penalty_window = llmConfig->penalty_window();
 }
 
 Sampler* Sampler::createSampler(std::shared_ptr<LlmContext> context, std::shared_ptr<LlmConfig> config) {
@@ -172,6 +248,11 @@ Sampler::Sampler(std::shared_ptr<LlmContext> context, std::shared_ptr<LlmConfig>
 SamplerState Sampler::createState(Express::VARP logits) {
     SamplerState state;
     auto ptr = logits->readMap<float>();
+    if (nullptr == ptr) {
+        MNN_ERROR("[LLM] sampler: logits read failed, backend execution stopped\n");
+        mContext->status = LlmStatus::INTERNAL_ERROR;
+        return state;
+    }
     int lastDim = logits->getInfo()->dim.back();
     state.vocab_size = lastDim;
     state.logits.assign(ptr, ptr + lastDim);
@@ -238,18 +319,17 @@ void Sampler::buildPipeline() {
     // final select step
     mPipeline.push_back([this](SamplerState& s) { stepSelect(s); });
 
-    // The device top-k prefilter is exact only when topK is the first
+    // The top-k prefilter is exact only when topK is the first
     // effective filter step: logit_bias / banned_tokens are applied before
     // topK on CPU, and a leading penalty step must be a no-op.
     if (mConfig.type == "mixed" && mConfig.topK > 0 && mConfig.logit_bias.empty() &&
         mConfig.banned_tokens.empty()) {
         const auto& ms = mConfig.mixedSamplers;
         if (!ms.empty() && ms[0] == "topK") {
-            mGpuTopKPrefilter = true;
+            mTopKPrefilter = true;
         } else if (ms.size() > 1 && ms[0] == "penalty" && ms[1] == "topK" &&
-                   mConfig.repetition_penalty <= 1.0f && mConfig.presence_penalty <= 0.0f &&
-                   mConfig.frequency_penalty <= 0.0f && mConfig.ngram_factor <= 1.0f) {
-            mGpuTopKPrefilter = true;
+                   !mConfig.isPenaltyActive()) {
+            mTopKPrefilter = true;
         }
     }
 }
@@ -258,27 +338,73 @@ int Sampler::sample(Express::VARP logits) {
     Timer _t;
     int lastDim = logits->getInfo()->dim.back();
     if (mConfig.type == "greedy") {
-        // Device-side argmax: only a 4-byte index crosses the device boundary
-        // instead of the full fp32 logits (~600 KB for Qwen3 vocab).
-        // MetalArgMax keeps the first-max tie-break identical to the CPU loop.
-        auto tokenIdx = Express::_ArgMax(logits, -1);
+        // Direct two-pass first-max on the host-mapped logits. The previous
+        // Express::_ArgMax form never actually ran on the GPU: the Llm executor
+        // is CPU, so the one-off expr cost ~330us/token in expr-session
+        // machinery on M4 Pro while this loop costs ~12us (full token period
+        // 10265us -> 9746us, +5.3%; note the sampling interval is excluded from
+        // the reported `decode speed`, so only wall clock shows it).
+        // Pass 1 is a pure max reduction; pass 2 takes the first index equal to
+        // it -- identical tie-break to the classic scalar first-max loop.
+        auto ptr = logits->readMap<float>();
+        if (nullptr == ptr) {
+            // The backend refused the read (e.g. a discarded GPU command
+            // buffer): fail the session instead of dereferencing nullptr or
+            // sampling garbage.
+            MNN_ERROR("[LLM] sampler: logits read failed, backend execution stopped\n");
+            mContext->status = LlmStatus::INTERNAL_ERROR;
+            return -1;
+        }
+        float bestV = ptr[0];
+#if defined(__aarch64__)
+        {
+            float32x4_t m0 = vdupq_n_f32(ptr[0]), m1 = m0, m2 = m0, m3 = m0;
+            int i = 0;
+            for (; i + 16 <= lastDim; i += 16) {
+                m0 = vmaxq_f32(m0, vld1q_f32(ptr + i));
+                m1 = vmaxq_f32(m1, vld1q_f32(ptr + i + 4));
+                m2 = vmaxq_f32(m2, vld1q_f32(ptr + i + 8));
+                m3 = vmaxq_f32(m3, vld1q_f32(ptr + i + 12));
+            }
+            bestV = vmaxvq_f32(vmaxq_f32(vmaxq_f32(m0, m1), vmaxq_f32(m2, m3)));
+            for (; i < lastDim; ++i) {
+                bestV = std::max(bestV, ptr[i]);
+            }
+        }
+#else
+        for (int i = 1; i < lastDim; ++i) {
+            bestV = std::max(bestV, ptr[i]);
+        }
+#endif
+        int best = 0;
+        for (int i = 0; i < lastDim; ++i) {
+            if (ptr[i] == bestV) {
+                best = i;
+                break;
+            }
+        }
         mContext->sample_us += _t.durationInUs();
-        return tokenIdx->readMap<int>()[0];
+        return best;
     }
     SamplerState state;
-    if (mGpuTopKPrefilter && mConfig.topK < lastDim) {
-        // Device-side top-k prefilter: TopKV2 on the device logits, then run
-        // the remaining pipeline steps on the k-sized subset. Equivalent to
-        // the CPU path because topK is the first effective filter step.
-        auto res = Express::_TopKV2(logits, Express::_Scalar<int>(mConfig.topK));
-        auto valuePtr = res[0]->readMap<float>();
-        auto indexPtr = res[1]->readMap<int>();
-        state.logits.assign(valuePtr, valuePtr + mConfig.topK);
-        state.indices.assign(indexPtr, indexPtr + mConfig.topK);
-        state.is_subset = true;
-        state.vocab_size = lastDim;
+    if (mTopKPrefilter && mConfig.topK < lastDim) {
+        // Top-k prefilter: run the remaining pipeline steps on the k-sized
+        // subset. Equivalent to the CPU path because topK is the first
+        // effective filter step.
+        auto ptr = logits->readMap<float>();
+        if (nullptr != ptr) {
+            topKSubset(ptr, lastDim, mConfig.topK, state.logits, state.indices);
+            state.is_subset = true;
+            state.vocab_size = lastDim;
+        } else {
+            state = createState(logits);
+        }
     } else {
         state = createState(logits);
+    }
+    if (mContext->status == LlmStatus::INTERNAL_ERROR) {
+        // createState failed to read logits (backend execution stopped).
+        return -1;
     }
     for (auto& step : mPipeline) {
         step(state);
@@ -309,7 +435,7 @@ void Sampler::stepPenalty(SamplerState& state) {
     int ngram = mConfig.ngram;
     float ngram_factor = mConfig.ngram_factor;
     bool penalizeNgram = (ngram_factor > 1.0f);
-    if (repPenalty <= 1.0f && presPenalty <= 0.0f && freqPenalty <= 0.0f) return;
+    if (!mConfig.isPenaltyActive()) return;
     repPenalty = std::min(repPenalty, mConfig.max_penalty);
 
     const std::vector<int>& prev = mContext->history_tokens;
