@@ -348,6 +348,9 @@
     
     <!-- Debug Activity Strings -->
     <string name="debug_activity_title">调试</string>
+    <string name="log_viewer_title">日志查看</string>
+    <string name="refresh_log">刷新</string>
+    <string name="log_truncated">[日志过大，仅显示末尾部分]</string>
     <string name="debug_activity_description">开发者测试界面，用于测试各种组件</string>
     <string name="debug_mode">调试模式</string>
     <string name="close_debug_mode">关闭调试模式</string>

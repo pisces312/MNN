@@ -11,6 +11,7 @@
 #include <sstream>
 #include <chrono>
 #include "mls_log.h"
+#include "MNN/MNNDefine.h"
 #include "MNN/expr/ExecutorScope.hpp"
 #include "nlohmann/json.hpp"
 #include "llm_stream_buffer.hpp"
@@ -19,6 +20,10 @@
 
 using MNN::Transformer::Llm;
 using json = nlohmann::json;
+
+#ifndef GIT_COMMIT_ID
+#define GIT_COMMIT_ID "unknown"
+#endif
 
 namespace {
 JavaVM* g_jvm = nullptr;
@@ -86,6 +91,13 @@ JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved) {
 JNIEXPORT void JNI_OnUnload(JavaVM *vm, void *reserved) {
     g_jvm = nullptr;
     __android_log_print(ANDROID_LOG_DEBUG, "MNN_DEBUG", "JNI_OnUnload");
+}
+
+JNIEXPORT jstring JNICALL Java_com_alibaba_mnnllm_android_llm_LlmSession_getMnnVersionNative(JNIEnv *env,
+                                                                                              jobject /*thiz*/) {
+    // Same format as MNN.nativeGetVersion (About page): "<version> (<git commit>)"
+    static const std::string version = std::string(MNN_VERSION) + " (" + GIT_COMMIT_ID + ")";
+    return env->NewStringUTF(version.c_str());
 }
 
 JNIEXPORT jlong JNICALL Java_com_alibaba_mnnllm_android_llm_LlmSession_initNative(JNIEnv *env,

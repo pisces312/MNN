@@ -516,6 +516,9 @@ class ChatActivity : AppCompatActivity() {
             )
         menu.findItem(R.id.menu_item_model_settings).isVisible = true
         menu.findItem(R.id.menu_item_benchmark_test).isVisible = benchmarkModule.enabled
+        // Log viewer entry: debug builds only
+        menu.findItem(R.id.menu_item_view_logs).isVisible =
+            com.alibaba.mnnllm.android.BuildConfig.DEBUG
         // Voice chat is only available for non-diffusion models
         menu.findItem(R.id.start_voice_chat).isVisible = !isDiffusion
         // Real-time audio playback is only available for Omni models
@@ -580,6 +583,11 @@ class ChatActivity : AppCompatActivity() {
             return true
         } else if (item.itemId == R.id.menu_item_config_info) {
             showConfigInfo()
+            return true
+        } else if (item.itemId == R.id.menu_item_view_logs) {
+            startActivity(
+                android.content.Intent(this, com.alibaba.mnnllm.android.debug.LogViewerActivity::class.java)
+            )
             return true
         }
         return super.onOptionsItemSelected(item)
@@ -810,7 +818,13 @@ class ChatActivity : AppCompatActivity() {
             }
         }
         
-        recentItem.benchmarkInfo = ModelUtils.generateBenchMarkString(benchMarkResult)
+        recentItem.benchmarkInfo = buildString {
+            append(ModelUtils.generateBenchMarkString(benchMarkResult))
+            getSessionRuntimeInfo()?.let {
+                append("\n")
+                append(it)
+            }
+        }
         chatListComponent.updateAssistantResponse(recentItem)
 
         if (isMockStreamSession) {
@@ -852,6 +866,26 @@ class ChatActivity : AppCompatActivity() {
 
     val sessionDebugInfo: String
         get() = chatSession!!.debugInfo
+
+    /** Cached "Model | Backend | Power | MNN version" line, resolved once per activity lifetime. */
+    private var cachedRuntimeInfo: String? = null
+
+    private fun getSessionRuntimeInfo(): String? {
+        cachedRuntimeInfo?.let { return it }
+        val session = chatSession as? LlmSession ?: return null
+        return try {
+            val config = session.getConfig()
+            val info = "Model: ${ModelUtils.getModelName(modelId)}" +
+                " | Backend: ${config?.backendType ?: "cpu"}" +
+                " | Power: ${config?.power ?: "normal"}" +
+                " | MNN: ${session.getMnnVersion()}"
+            cachedRuntimeInfo = info
+            info
+        } catch (e: Exception) {
+            Log.w(TAG, "getSessionRuntimeInfo failed", e)
+            null
+        }
+    }
 
     private fun showConfigInfo() {
         val session = chatSession

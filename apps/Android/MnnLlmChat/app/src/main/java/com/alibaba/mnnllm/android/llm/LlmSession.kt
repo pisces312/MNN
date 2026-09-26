@@ -397,6 +397,17 @@ class LlmSession (
         }
     }
 
+    private external fun getMnnVersionNative(): String
+
+    fun getMnnVersion(): String {
+        return try {
+            getMnnVersionNative()
+        } catch (e: Throwable) {
+            Log.w(TAG, "getMnnVersion failed", e)
+            "unknown"
+        }
+    }
+
     // Helper function to get current memory usage in MB
     private fun getCurrentMemoryUsageMB(context: Context): Long {
         val runtime = Runtime.getRuntime()

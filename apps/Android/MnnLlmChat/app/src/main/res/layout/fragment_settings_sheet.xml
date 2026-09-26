@@ -510,6 +510,16 @@
                         app:valueText="low"
                         app:icon="@drawable/baseline_arrow_drop_down_24" />
 
+                    <com.alibaba.mnnllm.android.modelsettings.DropDownLineView
+                        android:id="@+id/dropdownPower"
+                        android:layout_width="match_parent"
+                        android:clickable="true"
+                        android:layout_height="wrap_content"
+                        app:labelText="Power"
+                        app:valueText="normal"
+                        style="@style/SettingsRowContainer"
+                        app:icon="@drawable/baseline_arrow_drop_down_24" />
+
                     <TextView
                         android:id="@+id/tv_thread_num_label"
                         style="@style/SettingsRowLabel"

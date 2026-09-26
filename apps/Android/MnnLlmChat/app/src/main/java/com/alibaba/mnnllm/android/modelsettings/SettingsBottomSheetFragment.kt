@@ -132,6 +132,18 @@ class SettingsBottomSheetFragment : BaseSettingsBottomSheetFragment() {
             },
         )
 
+        // Power (CPU core affinity policy: high=bind big cores, low=little cores, normal=no binding)
+        val powerOptions = listOf("high", "normal", "low")
+        val currentPower = currentConfig.power?.takeIf { it in powerOptions } ?: defaultConfig.power!!
+        binding.dropdownPower.setCurrentItem(currentPower)
+        binding.dropdownPower.setDropDownItems(
+            powerOptions,
+            itemToString = { it.toString() },
+            onDropdownItemSelected = { _, item ->
+                currentConfig.power = item.toString()
+            },
+        )
+
         // Thread num
         val threadNum = currentConfig.threadNum ?: defaultConfig.threadNum!!
         binding.etThreadNum.setText(threadNum.toString())
@@ -571,6 +583,9 @@ class SettingsBottomSheetFragment : BaseSettingsBottomSheetFragment() {
             needSaveConfig = true
             needRecreate = true
         } else if (currentConfig.threadNum != loadedConfig.threadNum) {
+            needSaveConfig = true
+            needRecreate = true
+        } else if (currentConfig.power != loadedConfig.power) {
             needSaveConfig = true
             needRecreate = true
         } else if (currentConfig.backendType != loadedConfig.backendType) {

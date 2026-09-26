@@ -36,6 +36,11 @@
         android:id="@+id/menu_item_config_info"
         android:title="@string/config_info"
         app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_item_view_logs"
+        android:title="@string/view_logs"
+        app:showAsAction="never" />
     
     <item
         android:id="@+id/menu_item_api_settings"

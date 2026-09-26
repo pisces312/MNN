@@ -118,6 +118,12 @@
             android:theme="@style/AppTheme" />
 
         <activity
+            android:name=".debug.LogViewerActivity"
+            android:exported="false"
+            android:label="@string/log_viewer_title"
+            android:theme="@style/AppTheme" />
+
+        <activity
             android:name=".debug.VideoDecoderTestActivity"
             android:exported="false"
             android:label="@string/video_decoder_test_title"
