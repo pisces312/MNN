@@ -1,23 +1,6 @@
 name: android
 on:
-  push:
-    branches:
-     - master
-     - 'feature/**'
-    paths:
-      - 'source/**'
-      - 'express/**'
-      - 'test/**'
-      - 'project/android/**'
-      - '.github/workflows/android.yml'
-  pull_request:
-    branches: [master]
-    paths:
-      - 'source/**'
-      - 'express/**'
-      - 'test/**'
-      - 'project/android/**'
-      - '.github/workflows/android.yml'
+  workflow_dispatch:
 
 concurrency:
   group: android-${{ github.ref }}

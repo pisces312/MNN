@@ -1,17 +1,6 @@
 name: pymnn-macos
 on:
-  push:
-    branches:
-     - master
-     - 'feature/**'
-    paths:
-      - 'pymnn/**'
-      - '.github/workflows/pymnn_macos.yml'
-  pull_request:
-    branches: [master]
-    paths:
-      - 'pymnn/**'
-      - '.github/workflows/pymnn_macos.yml'
+  workflow_dispatch:
 
 concurrency:
   group: pymnn-macos-${{ github.ref }}

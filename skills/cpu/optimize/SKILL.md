@@ -27,7 +27,7 @@ description: MNN CPU 后端性能归因分支（`skills/cpu/` 下，另一分支
 | 这个 op MNN 里还没有 | [`add-new-op`](../../add-new-op/SKILL.md) |
 | RISC-V / RVV / 厂商矩阵扩展（IME2）在哪条路径上 | [`arch/riscv.md`](arch/riscv.md) |
 | 要在 RISC-V 开发板上交叉编译、跑正确性与性能 | [`cpu/shared/riscv-remote-validation.md`](../shared/riscv-remote-validation.md) |
-| 要跑 CI / 加测试阶段 | [`test-ci`](../../test-ci/SKILL.md) |
+| 要跑测试 / 加测试阶段 | [`test-ci`](../../test-ci/SKILL.md) |
 
 ## 前置纪律
 

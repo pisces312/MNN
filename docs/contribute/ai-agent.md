@@ -25,7 +25,7 @@ Agent 进入仓库后，建议按以下顺序读取上下文：
 | LLM 模型适配或导出 | `skills/support-new-llm/SKILL.md`、`docs/transformers/llm.md` |
 | CPU 性能优化 / kernel 开发（ARM / x86_64 / RISC-V） | `skills/cpu/SKILL.md`（下分 `optimize/` 性能归因与 `kernel/` kernel 开发两个分支）、`docs/perf/README.md` |
 | OpenCL / Metal / Vulkan 优化 | 对应 backend skill、`docs/perf/README.md`、相关 backend 文档 |
-| 测试、CI、测试阶段调整 | `skills/test-ci/SKILL.md`、`docs/testing.md` |
+| 测试、测试阶段调整 | `skills/test-ci/SKILL.md`、`docs/testing.md` |
 | C++ 推理用法 | `docs/start/quickstart_cpp.md`、`docs/inference/module.md`、`docs/inference/session.md` |
 | Python 推理用法 | `docs/start/quickstart_python.md`、`docs/start/python.md`、`docs/pymnn/MNN.md` |
 | 构建问题 | `docs/compile/engine.md`、`docs/compile/cmake.md`、`docs/faq.md` |

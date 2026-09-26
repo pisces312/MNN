@@ -146,7 +146,7 @@ convs[1]=up，`out = up * silu(gate)`）。构造顺序沿用旧导出约定：q
   谓词是 `FusedProjCommon::compositeEnvelopeOk`（额外要求全部成员为 int 量化 type=1——
   fp16 权重成员在 Vulkan 会落到 `VulkanConvolutionImpl::create` 的不确定分支，保守走分解）。
   组合容器把成员 conv / 二元 RMSNorm / MUL_SILU 作为子执行驱动，数值与分解路径逐字节等价，
-  保留整 op 是为将来收敛 kernel 数做准备。CUDA 无本仓 CI，生产启用前需 Linux+NVIDIA 人工验证；
+  保留整 op 是为将来收敛 kernel 数做准备。CUDA 无本仓自动化测试，生产启用前需 Linux+NVIDIA 人工验证；
   CUDA Memory_High（或未编译 MNN_LOW_MEMORY）时成员 conv 走 float 反量化路径，LLM 权重显存放大。
 
 其它情况在 geometry 阶段把它**拆回原始的 conv1x1 子图**（外加 LayerNorm / SiLU-Mul）。

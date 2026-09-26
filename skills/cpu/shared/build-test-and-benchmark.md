@@ -163,7 +163,7 @@ argv 全是**位置**参数，无名字、错位不报错（`test/main.cpp`）�
 | 9 | 跑分 | 同 #8 | 同 #8 | — | `./llm_bench -m <config.json> -t 4 -pg 2048,32 -rep 3` | — | 与 #8 配对才算成立（§四） |
 
 - 每一维至少两格，不要用一格代表全部；线程档固定取 **1 / 4 / 超过 P 核数**三档。
-- `memory=2` 与 `dynamicOption` 的既有分档参照 CI：`test_stages.json`（dyn：`memory=2`+`dynamicOption=2`）
+- `memory=2` 与 `dynamicOption` 的既有分档参照 `test_stages.json`（dyn：`memory=2`+`dynamicOption=2`）
   与 （wdeq：省略 memory）。两类语义不同，都要覆盖。
 - ISA 降档的档位含义与自证方法不在本文，见各 ISA 文档 §三。
 

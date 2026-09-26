@@ -1,9 +1,5 @@
 name: mnn_release
 on:
-  push:
-    tags:
-      - '*'
-      - '!Android*'
   workflow_dispatch:
 
 jobs:

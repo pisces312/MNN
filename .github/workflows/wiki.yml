@@ -1,17 +1,6 @@
 name: wiki
 on:
-  push:
-    branches:
-     - master
-     - 'feature/**'
-    paths:
-      - 'docs/**'
-      - '.github/workflows/wiki.yml'
-  pull_request:
-    branches: [master]
-    paths:
-      - 'docs/**'
-      - '.github/workflows/wiki.yml'
+  workflow_dispatch:
 
 concurrency:
   group: wiki-${{ github.ref }}

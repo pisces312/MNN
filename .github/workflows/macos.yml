@@ -1,21 +1,6 @@
 name: macos
 on:
-  push:
-    branches:
-     - master
-     - 'feature/**'
-    paths:
-      - 'source/**'
-      - 'express/**'
-      - 'test/**'
-      - '.github/workflows/macos.yml'
-  pull_request:
-    branches: [master]
-    paths:
-      - 'source/**'
-      - 'express/**'
-      - 'test/**'
-      - '.github/workflows/macos.yml'
+  workflow_dispatch:
 
 concurrency:
   group: macos-${{ github.ref }}

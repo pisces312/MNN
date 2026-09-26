@@ -1,23 +1,6 @@
 name: ios
 on:
-  push:
-    branches:
-     - master
-     - 'feature/**'
-    paths:
-      - 'source/**'
-      - 'express/**'
-      - 'test/**'
-      - 'project/ios/**'
-      - '.github/workflows/ios.yml'
-  pull_request:
-    branches: [master]
-    paths:
-      - 'source/**'
-      - 'express/**'
-      - 'test/**'
-      - 'project/ios/**'
-      - '.github/workflows/ios.yml'
+  workflow_dispatch:
 
 concurrency:
   group: ios-${{ github.ref }}

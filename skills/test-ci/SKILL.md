@@ -1,15 +1,15 @@
 ---
 name: test-ci
-description: Run MNN tests / benchmarks on host or real devices. Covers two parallel tracks — (1) the regression / CI suite (static checks, host-side tests, on-device Android arm64 matrix via ./test.sh + test_stages.json) and (2) one-command iOS real-device LLM benchmarking (prefill/decode tok/s, branch comparison). Use when the user asks to run the tests, run CI, smoke-test a build, verify a change on a device, benchmark on-device (Android or iPhone/iPad), or add / select / retune a test stage.
+description: Run MNN tests / benchmarks on host or real devices. Covers two parallel tracks — (1) the regression test suite (static checks, host-side tests, on-device Android arm64 matrix via ./test.sh + test_stages.json) and (2) one-command iOS real-device LLM benchmarking (prefill/decode tok/s, branch comparison). Use when the user asks to run the tests, smoke-test a build, verify a change on a device, benchmark on-device (Android or iPhone/iPad), or add / select / retune a test stage.
 ---
 
-# MNN Test / CI SKILL (index)
+# MNN Test SKILL (index)
 
 This skill is an **index**. Pick the document that matches the task and follow it:
 
 | Document | Use when |
 |----------|----------|
-| [`test-suite.md`](test-suite.md) | Run the regression / CI suite — static checks, host (local) tests, the on-device **Android** arm64 matrix (`./test.sh` + `test_stages.json`); add / select / retune a test stage; audit stale CI scripts; add a new test. |
+| [`test-suite.md`](test-suite.md) | Run the regression test suite — static checks, host (local) tests, the on-device **Android** arm64 matrix (`./test.sh` + `test_stages.json`); add / select / retune a test stage; audit stale test scripts; add a new test. |
 | [`ios-llm-bench.md`](ios-llm-bench.md) | Benchmark LLM prefill/decode speed on a real **iPhone/iPad** (`ios_llm_bench.sh`); compare branches on iOS Metal/CPU; verify Metal kernel changes on device. |
 
 The two tracks are independent: Android/host regression testing goes through
@@ -153,23 +153,23 @@ file explains every field and every `skip` entry's rationale.
   stage's `skip` array **and** document why under `_documentation.skip_rationale`.
 * **Add a smoke model / bench entry** → see `docs/testing.md` § "新增 smoke 模型或 bench 阶段".
 
-## Auditing stale CI/test scripts
+## Auditing stale test scripts
 
-When asked to clean up old CI or test scripts, build a usage map before
+When asked to clean up old test scripts, build a usage map before
 recommending deletion:
 
 * Prefer `git ls-files` plus targeted `rg`/`git grep` over broad filesystem
   scans, so generated build directories and local experiments do not look like
-  maintained CI surface.
-* Classify scripts by role: active CI entrypoints, declarative test driver,
+  maintained test surface.
+* Classify scripts by role: active test entrypoints, declarative test driver,
   release/package scripts, manual benchmark helpers, third-party vendored
   tests, and local device/debug helpers.
 * Treat lack of in-repo references as a "review/deprecate" signal, not proof
-  of dead code; internal CI systems can invoke tracked files by convention.
+  of dead code; internal systems can invoke tracked files by convention.
   Prefer a staged deprecation plan unless a script is both unreferenced and
   clearly superseded by `test.sh` / `test_stages.json`.
 * When renaming or consolidating test entrypoints, grep for both executable
-  names and generated-artifact prefixes. Update CI config, `.gitignore`,
+  names and generated-artifact prefixes. Update `.gitignore`,
   `test_stages.json` self-documentation, developer docs, skill docs, and code
   comments in the same change so the old entrypoint disappears completely.
 

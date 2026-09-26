@@ -2,9 +2,6 @@ name: Sync merged PR
 run-name: Sync merged PR
 
 on:
-  pull_request_target:
-    types: [closed]
-    branches: [master]
   workflow_dispatch:
     inputs:
       pipeline_branch:

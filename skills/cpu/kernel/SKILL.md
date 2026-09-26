@@ -109,4 +109,4 @@ x86_64 侧只有一条 ISA 轴，原因见下。
 - [`cpu/optimize`](../optimize/SKILL.md)：性能诊断、线程与调度、布局与内存、跨层不一致的事后定位。
 - [`cpu/shared/riscv-remote-validation.md`](../shared/riscv-remote-validation.md)：RISC-V 开发板交叉编译、板端正确性与性能实验的专属纪律。
 - [`general-debug`](../../general-debug/SKILL.md)（skill 名 `bugfix`）：按症状分流的排查入口，下分七册（内存别名、导出/量化、fp16 值域、GPU 越界、kernel 隐式假设、陈旧缓存、逐 run 非确定）。
-- [`test-ci`](../../test-ci/SKILL.md)：跑回归 / CI / 真机 benchmark。
+- [`test-ci`](../../test-ci/SKILL.md)：跑回归 / 真机 benchmark。

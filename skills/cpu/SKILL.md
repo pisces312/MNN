@@ -25,7 +25,7 @@ description: MNN CPU 后端（ARM / x86_64 / RISC-V 三侧）的总入口，只�
 | 这个算子 MNN 里还没有（缺 schema / shape / geometry） | [`add-new-op`](../add-new-op/SKILL.md) |
 | RISC-V / RVV / SpacemiT IME2 厂商矩阵扩展 | 诊断 [`optimize/arch/riscv.md`](optimize/arch/riscv.md)；实现 [`kernel/arch/riscv.md`](kernel/arch/riscv.md) |
 | 要在 RISC-V 开发板上编译 / 跑正确性 / 跑性能 | [`shared/riscv-remote-validation.md`](shared/riscv-remote-validation.md) |
-| 要跑 CI / 加测试阶段 / 真机 benchmark | [`test-ci`](../test-ci/SKILL.md) |
+| 要跑测试 / 加测试阶段 / 真机 benchmark | [`test-ci`](../test-ci/SKILL.md) |
 
 **最常见的走错**：性能数据还没有就直接进 `kernel/` 手写 kernel。手写 kernel 是最贵的一层，
 先在 `optimize/` 侧过投入决策门——已经跑到 82% roofline 的 kernel 再写一版汇编是白干。

@@ -155,17 +155,6 @@ If the script fails, you can run individual steps manually:
 ### Security Notes
 
 - Never commit `release.config` with actual credentials
-- Use environment variables in CI/CD systems
+- Use environment variables instead of hardcoding secrets
 - Keep keystore files secure and backed up
 - Rotate access keys regularly
-
-### CI/CD Integration
-
-For CI/CD integration, set the environment variables in your CI/CD system and run:
-
-```bash
-source scripts/release.config
-./scripts/release.sh
-```
-
-The script will automatically detect missing configurations and skip those steps while continuing with available builds. 

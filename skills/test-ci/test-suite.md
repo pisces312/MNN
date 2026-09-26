@@ -1,7 +1,7 @@
-# MNN Regression / CI Suite (host + Android)
+# MNN Regression Test Suite (host + Android)
 
-> **Trigger**: when the user wants to run the test suite or CI ("run the tests",
-> "run CI", "smoke test", "does this still pass", "verify on the phone/device",
+> **Trigger**: when the user wants to run the test suite ("run the tests",
+> "run the tests", "smoke test", "does this still pass", "verify on the phone/device",
 > "benchmark on device"), or to add / select / retune a test stage.
 
 The operational scripts live at the **repository root** and are invoked from
@@ -143,23 +143,23 @@ file explains every field and every `skip` entry's rationale.
   stage's `skip` array **and** document why under `_documentation.skip_rationale`.
 * **Add a smoke model / bench entry** → see `docs/testing.md` § "新增 smoke 模型或 bench 阶段".
 
-## Auditing stale CI/test scripts
+## Auditing stale test scripts
 
-When asked to clean up old CI or test scripts, build a usage map before
+When asked to clean up old test scripts, build a usage map before
 recommending deletion:
 
 * Prefer `git ls-files` plus targeted `rg`/`git grep` over broad filesystem
   scans, so generated build directories and local experiments do not look like
-  maintained CI surface.
-* Classify scripts by role: active CI entrypoints, declarative test driver,
+  maintained test surface.
+* Classify scripts by role: active test entrypoints, declarative test driver,
   release/package scripts, manual benchmark helpers, third-party vendored
   tests, and local device/debug helpers.
 * Treat lack of in-repo references as a "review/deprecate" signal, not proof
-  of dead code; internal CI systems can invoke tracked files by convention.
+  of dead code; internal systems can invoke tracked files by convention.
   Prefer a staged deprecation plan unless a script is both unreferenced and
   clearly superseded by `test.sh` / `test_stages.json`.
 * When renaming or consolidating test entrypoints, grep for both executable
-  names and generated-artifact prefixes. Update CI config, `.gitignore`,
+  names and generated-artifact prefixes. Update `.gitignore`,
   `test_stages.json` self-documentation, developer docs, skill docs, and code
   comments in the same change so the old entrypoint disappears completely.
 
