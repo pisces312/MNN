@@ -67,8 +67,8 @@ android {
         applicationId "com.alibaba.mnnllm.android"
         minSdk 26
         targetSdk 35
-        versionCode 26081701
-        versionName "0.8.3.4"
+        versionCode 26092601
+        versionName "0.8.3.5"
         buildConfigField "String", "FORK_TAG", "\"pisces\""
         buildConfigField "boolean", "IS_FORK_BUILD", "true"
         buildConfigField "boolean", "ENABLE_FIREBASE", enableFirebase ? "true" : "false"
