@@ -54,6 +54,24 @@ MSYS_NO_PATHCONV=1 wsl -d Ubuntu -- bash /mnt/d/3rd-party-projects/MNN/build_nat
 - **APK 必须在 Windows 构建**(JDK/Android SDK 路径不兼容 WSL);**native 必须在 WSL 构建**(NDK/QNN SDK 是 Linux 路径)。`build.sh` 内部已通过 `wsl -d Ubuntu` 处理跨界调用，无需手工切换
 - **上游合并后的完整 checklist**:① `build_native.sh --clean` 重建 libMNN.so;② 检查合并是否触及 `source/backend/hexagon/`，是则重编 htp-ops 库（见上节）;③ `./build.sh` 出 APK
 
+### 构建踩坑速查
+
+- **Git Bash 直接调 `wsl` 会被路径污染**：`wsl -d Ubuntu -- bash /mnt/d/.../build_native.sh` 会被转成
+  `D:/dev/git/mnt/d/...` 报 No such file。必须写成 `MSYS_NO_PATHCONV=1 wsl ...`。
+  反过来 `build.sh` 给 gradle/java 传路径**需要** MSYS 转换（脚本开头 `unset MSYS_NO_PATHCONV`），
+  两者要求相反，不要混用
+- **`gh` 默认指向上游 `alibaba/MNN`**：查/建 fork 的 release 必须显式 `--repo pisces312/MNN`，
+  否则列出的 3.6.1 / 3.6.0 全是上游 release
+- **上游 NPU 插件化（`MNN_NPU_BACKENDS_SHARED`，默认 OFF）不影响单库构建**：QNN 仍以 OBJECT
+  并入 `libMNN.so`，`build_native.sh` 无需改。验证方式：
+  `grep -a -c "Llm5reset" libMNN.so`（=1）、`grep -a -o "QnnBackend[A-Za-z]*"`、
+  `grep -a -o "[A-Za-z]*Hexagon[A-Za-z]*"`（应见 HexagonRuntime / HexagonBackend）
+- **`MNN_KLEIDIAI` 默认已由 ON 改 OFF**：两层开关，本 fork 从未启用过，详见
+  `docs/kleidiai-build-option.md`
+- **合并前无冲突预检**（不动工作区）：
+  `git merge-tree --write-tree --name-only HEAD upstream/master`，只输出一行 tree oid 即无冲突
+- 完整「同步上游 → 重编 → 验证 → bump → 发版」流程见 `.workbuddy/skills/mnn-fork-release/SKILL.md`
+
 ## 版本信息
 
 | 组件 | 版本 |
@@ -225,6 +243,15 @@ bash /mnt/d/workspace/mnn-research/convert_qnn.sh /mnt/d/models/<model_dir> <cac
 - **backend 选 `cpu`**：离线产物由注册在 CPU backend 的 plugin 算子加载执行，HTP 加速在 plugin 内部完成；`npu` 选项是在线构图入口，LLM 必崩
 - 手机模型目录 `/sdcard/mnn-models/<name>/`，目录名不得含 `qnn` 子串（会触发 app 下载流程）
 - 必需文件 7 个：`config.json`（含 `backend_type=cpu`、`llm_model=qnn/llm.mnn`、`chunk_limits=[128,1]`）、`llm_config.json`、`tokenizer.mtok`、`embeddings_bf16.bin`、`llm.mnn.weight`（仅存在性检查，必须推）、`qnn/llm.mnn`、`qnn/graph0.bin`
+
+## mmap 权重（use_mmap）
+
+- 开关：模型 `config.json` 的 `"use_mmap"` → `LlmSession.kt:79` → native `mmap_dir` →
+  `llm.cpp:216` `EXTERNAL_WEIGHT_DIR`
+- **只对 CPU 后端生效**（`weightMemoryPath` 仅 `CPUBackend.cpp:281` 消费）；QNN / Hexagon /
+  OpenCL 后端开它没有收益，只白占一份磁盘
+- 代价、缓存过期风险、`sync.static` 复用逻辑见 `docs/mmap-usage.md`
+- UI 侧开关未接线：`ModelPreferences.KEY_USE_MMAP` 已定义但无引用
 
 ## 调试
 
