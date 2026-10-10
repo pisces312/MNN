@@ -89,15 +89,16 @@ class GenerateResultProcessor {
      * @param progress The incoming string chunk, or null if the stream has ended.
      */
     fun process(progress: String?) {
-        Log.d(TAG, "process: #${progress}#")
         if (progress == null) {
-            // Handle end of stream based on the detected format
+            // EOS marker from JNI (is_eop → null). Flush pending buffers; never treat as content.
+            Log.d(TAG, "process: EOS")
             when (currentFormat) {
                 StreamFormat.THINK_TAGS, StreamFormat.UNKNOWN -> processThinkTags(null)
                 StreamFormat.GPT_OSS -> processGptOss(null)
             }
             return
         }
+        Log.d(TAG, "process: #${progress}#")
 
         // Append to the raw string builder first. This is crucial for GPT_OSS logic
         // which re-processes the entire history.

@@ -177,6 +177,13 @@ void LlmSession::Reset() {
 LlmSession::LlmSession(std::string model_path, json config, json extra_config, std::vector<std::string> history):
         model_path_(std::move(model_path)), config_(std::move(config)), extra_config_(std::move(extra_config)) {
     max_new_tokens_ = config_.contains("max_new_tokens") ?  config_["max_new_tokens"].get<int>() : 2048;
+    {
+        constexpr int kMaxNewTokensLimit = 4096;
+        if (max_new_tokens_ > kMaxNewTokensLimit) {
+            MNN_DEBUG("max_new_tokens %d exceeds mobile limit %d, clamping", max_new_tokens_, kMaxNewTokensLimit);
+            max_new_tokens_ = kMaxNewTokensLimit;
+        }
+    }
     keep_history_ = !extra_config_.contains("keep_history") || extra_config_["keep_history"].get<bool>();
     is_r1_ = extra_config_.contains("is_r1") && extra_config_["is_r1"].get<bool>();
     system_prompt_ = config_.contains("system_prompt") ? config_["system_prompt"].get<std::string>() : "You are a helpful assistant.";
@@ -289,15 +296,32 @@ const MNN::Transformer::LlmContext * LlmSession::Response(const std::string &pro
     history_.emplace_back("user", getUserString(prompt.c_str(), false, is_r1_));
 #endif
     MNN_DEBUG("submitNative history count %zu", history_.size());
-    
+
     // Generate full prompt string using Prompt::applyTemplate
     std::string full_prompt_text;
+    prompt_string_for_debug.clear();
     for (auto & it : history_) {
         full_prompt_text += it.second;
-        prompt_string_for_debug += it.second;
+        prompt_string_for_debug += "[" + it.first + "]: " + it.second + "\n";
     }
-    
-    MNN_DEBUG("submitNative prompt_string_for_debug count %s max_new_tokens_:%d", prompt_string_for_debug.c_str(), max_new_tokens_);
+
+    {
+        auto cfgStr = [this](const char* key, const char* fallback) -> std::string {
+            return (config_.contains(key) && config_[key].is_string()) ? config_[key].get<std::string>() : fallback;
+        };
+        int threads = (config_.contains("thread_num") && config_["thread_num"].is_number_integer())
+                          ? config_["thread_num"].get<int>() : 4;
+        int use_mmap = (extra_config_.contains("mmap_dir") && extra_config_["mmap_dir"].is_string() &&
+                        !extra_config_["mmap_dir"].get<std::string>().empty()) ? 1 : 0;
+        MNN_DEBUG("submitNative config backend=%s threads=%d power=%s precision=%s max_new_tokens=%d use_mmap=%d",
+                  cfgStr("backend_type", "cpu").c_str(),
+                  threads,
+                  cfgStr("power", "normal").c_str(),
+                  cfgStr("precision", "low").c_str(),
+                  max_new_tokens_,
+                  use_mmap);
+    }
+    MNN_DEBUG("submitNative prompt_string_for_debug:\n%s", prompt_string_for_debug.c_str());
     
     // Check for multimodal content in the full prompt
     auto multimodal_result = processMultimodalPrompt(full_prompt_text);
@@ -400,6 +424,12 @@ void LlmSession::SetWavformCallback(std::function<bool(const float *, size_t, bo
 }
 
 void LlmSession::SetMaxNewTokens(int i) {
+    // Mobile safety ceiling: large values risk OOM / multi-minute CPU generations.
+    constexpr int kMaxNewTokensLimit = 4096;
+    if (i > kMaxNewTokensLimit) {
+        MNN_DEBUG("SetMaxNewTokens: %d exceeds mobile limit %d, clamping", i, kMaxNewTokensLimit);
+        i = kMaxNewTokensLimit;
+    }
     max_new_tokens_ = i;
 }
 

@@ -125,11 +125,23 @@ data class ModelConfig(
 
         const val TAG = "ModelConfig"
 
+        /** Mobile safety ceiling for max_new_tokens; larger values risk OOM / multi-minute generations on CPU. */
+        const val MAX_NEW_TOKENS_LIMIT = 4096
+
+        private fun clampMaxNewTokens(config: ModelConfig?): ModelConfig? {
+            val tokens = config?.maxNewTokens ?: return config
+            if (tokens > MAX_NEW_TOKENS_LIMIT) {
+                Log.w(TAG, "max_new_tokens $tokens exceeds mobile limit $MAX_NEW_TOKENS_LIMIT, clamping")
+                config.maxNewTokens = MAX_NEW_TOKENS_LIMIT
+            }
+            return config
+        }
+
         fun loadDefaultConfig(filePath: String): ModelConfig? {
             return try {
                 val file = File(filePath)
                 val json = file.readText()
-                Gson().fromJson(json, ModelConfig::class.java)
+                clampMaxNewTokens(Gson().fromJson(json, ModelConfig::class.java))
             } catch (e: Exception) {
                 e.printStackTrace()
                 null
@@ -155,7 +167,7 @@ data class ModelConfig(
                     val overrideJson = JsonParser.parseString(overrideFile.readText()).asJsonObject
                     mergeJson(originalJson, overrideJson)
                 }
-                Gson().fromJson(originalJson, ModelConfig::class.java)
+                clampMaxNewTokens(Gson().fromJson(originalJson, ModelConfig::class.java))
             } catch (e: Exception) {
                 e.printStackTrace()
                 null
