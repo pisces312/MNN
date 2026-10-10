@@ -66,8 +66,7 @@ MSYS_NO_PATHCONV=1 wsl -d Ubuntu -- bash /mnt/d/3rd-party-projects/MNN/build_nat
   并入 `libMNN.so`，`build_native.sh` 无需改。验证方式：
   `grep -a -c "Llm5reset" libMNN.so`（=1）、`grep -a -o "QnnBackend[A-Za-z]*"`、
   `grep -a -o "[A-Za-z]*Hexagon[A-Za-z]*"`（应见 HexagonRuntime / HexagonBackend）
-- **`MNN_KLEIDIAI` 默认已由 ON 改 OFF**：两层开关，本 fork 从未启用过，详见
-  `docs/kleidiai-build-option.md`
+- **`MNN_KLEIDIAI` 默认已由 ON 改 OFF**：两层开关（编译期 `MNN_KLEIDIAI` + 运行期 `enableKleidiAI`），本 fork 未设 `MNN_KLEIDIAI_DEFAULT_ON`，APK 内 KleidiAI kernel 从未启用，运行时零影响（详细调研文档已于 2026-10 上游同步时移除）
 - **合并前无冲突预检**（不动工作区）：
   `git merge-tree --write-tree --name-only HEAD upstream/master`，只输出一行 tree oid 即无冲突
 - 完整「同步上游 → 重编 → 验证 → bump → 发版」流程见 `.workbuddy/skills/mnn-fork-release/SKILL.md`
