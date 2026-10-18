@@ -67,6 +67,7 @@ MSYS_NO_PATHCONV=1 wsl -d Ubuntu -- bash /mnt/d/3rd-party-projects/MNN/build_nat
   `grep -a -c "Llm5reset" libMNN.so`（=1）、`grep -a -o "QnnBackend[A-Za-z]*"`、
   `grep -a -o "[A-Za-z]*Hexagon[A-Za-z]*"`（应见 HexagonRuntime / HexagonBackend）
 - **`MNN_KLEIDIAI` 默认已由 ON 改 OFF**：两层开关（编译期 `MNN_KLEIDIAI` + 运行期 `enableKleidiAI`），本 fork 未设 `MNN_KLEIDIAI_DEFAULT_ON`，APK 内 KleidiAI kernel 从未启用，运行时零影响（详细调研文档已于 2026-10 上游同步时移除）
+- **本机无全局 Gradle 配置**（2026-10-18 起）：`D:\dev\.gradle`（GRADLE_USER_HOME）只有缓存，`init.d/` 已删除。曾短暂存在全局 `mirror.gradle`（allprojects 项目级仓库注入），与本机 28 个项目的 `FAIL_ON_PROJECT_REPS` 冲突导致构建直接失败——仓库镜像一律**项目级自治**（各项目 settings.gradle 自配；本 fork 的 aliyun 三镜像见 settings.gradle）。遇到依赖/插件下载 stall 时在对应项目 settings.gradle 内加镜像，**不要再建全局 init 脚本**
 - **合并前无冲突预检**（不动工作区）：
   `git merge-tree --write-tree --name-only HEAD upstream/master`，只输出一行 tree oid 即无冲突
 - 完整「同步上游 → 重编 → 验证 → bump → 发版」流程见 `.workbuddy/skills/mnn-fork-release/SKILL.md`
