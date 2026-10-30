@@ -291,6 +291,10 @@ static void MNNNormPackedFp16(float* normOut_, float* sumOut_, const float* sour
     // drops out; the fp32 recompute in pass 3 then costs no more loads than a
     // read-back of sumOut would have.
     const bool squaresFromPass1 = RMSNorm && residual != nullptr;
+    // Match MNNQuantizeFP16 when storing the residual output. Keep the original
+    // FP32 values for all statistics and normalization.
+    const auto minFp16 = vdupq_n_f32(-65504.0f);
+    const auto maxFp16 = vdupq_n_f32(65504.0f);
 
     auto loadExactPair = [&](size_t offset) {
         float32x4_t value = vcvt_f32_f16(vld1_f16(source + offset));
@@ -327,8 +331,8 @@ static void MNNNormPackedFp16(float* normOut_, float* sumOut_, const float* sour
                     float32x4_t lo = loadExactPair(offset);
                     float32x4_t hi = loadExactPair(offset + 4);
                     if (residual != nullptr) {
-                        vst1_f16(sumOut + offset, vcvt_f16_f32(lo));
-                        vst1_f16(sumOut + offset + 4, vcvt_f16_f32(hi));
+                        vst1_f16(sumOut + offset, vcvt_f16_f32(vminq_f32(vmaxq_f32(lo, minFp16), maxFp16)));
+                        vst1_f16(sumOut + offset + 4, vcvt_f16_f32(vminq_f32(vmaxq_f32(hi, minFp16), maxFp16)));
                     }
                     if (squaresFromPass1) {
                         squareAcc[token] = vfmaq_f32(squareAcc[token], lo, lo);
@@ -347,7 +351,9 @@ static void MNNNormPackedFp16(float* normOut_, float* sumOut_, const float* sour
                     for (size_t lane = 0; lane < remain; ++lane) {
                         const float value = loadExactLane(offset + lane);
                         if (residual != nullptr) {
-                            sumOut[offset + lane] = static_cast<__fp16>(value);
+                            const float saturated =
+                                value > 65504.0f ? 65504.0f : (value < -65504.0f ? -65504.0f : value);
+                            sumOut[offset + lane] = static_cast<__fp16>(saturated);
                         }
                         if (squaresFromPass1) {
                             squareSums[token] += value * value;
@@ -661,11 +667,19 @@ static void MNNPackedMatMulFP16WithSme2PackedB(float* C, const float* A, const f
     MNNPackedMatMulRemainFP16WithSme2PackedB(C, A, B, 16, parameter, postParameters, bias, k, b);
 }
 
+// Older Clang headers expose FML intrinsics only when enabled for the whole translation unit.
+#if defined(__ARM_FEATURE_FP16_FML) || defined(vfmlalq_lane_low_f16)
+#define MNN_ARM82_HAS_FP16_FML
 template <int ET, int HT = 8>
+#ifdef __clang__
+__attribute__((target("fp16fml")))
+#else
 __attribute__((target("arch=armv8.2-a+fp16fml")))
-static void MNNPackedMatMulRemainFP16WithSme2PackedB_Fmlal_E(float* C, const float* A, const float* B, size_t eSize,
-                                                         const size_t* parameter, const float* postParameters,
-                                                         const float* bias, const float* k, const float* b) {
+#endif
+static void
+MNNPackedMatMulRemainFP16WithSme2PackedB_Fmlal_E(float* C, const float* A, const float* B, size_t eSize,
+                                                 const size_t* parameter, const float* postParameters,
+                                                 const float* bias, const float* k, const float* b) {
     MNN_ASSERT(postParameters == nullptr && bias == nullptr && k == nullptr && b == nullptr);
     const size_t aStride = parameter[0] / sizeof(FLOAT16);
     const size_t l = parameter[1];
@@ -781,6 +795,7 @@ static void MNNPackedMatMulFP16WithSme2PackedB_Fmlal(float* C, const float* A, c
                                                       const float* bias, const float* k, const float* b) {
     MNNPackedMatMulRemainFP16WithSme2PackedB_Fmlal_E<8>(C, A, B, 16, parameter, postParameters, bias, k, b);
 }
+#endif
 #endif
 #else
 static void ARM82CountMinMaxValue(float* source, float* minVal, float* maxVal, size_t size) {
@@ -3401,14 +3416,16 @@ bool Arm82Functions::init() {
     gInstance->MNNQuantAttentionKey = MNNQuantAttentionKeyFP16;
     gInstance->MNNQuantAttentionValue = MNNQuantAttentionValueFP16;
 #if defined(MNN_SME2) && defined(__aarch64__) && defined(MNN_USE_NEON)
+    FUNC_PTR_ASSIGN(gInstance->MNNPackedMatMulWithSme2PackedB, MNNPackedMatMulFP16WithSme2PackedB);
+    FUNC_PTR_ASSIGN(gInstance->MNNPackedMatMulRemainWithSme2PackedB, MNNPackedMatMulRemainFP16WithSme2PackedB);
+#ifdef MNN_ARM82_HAS_FP16_FML
     if (origin->supportFp16FML) {
         FUNC_PTR_ASSIGN(gInstance->MNNPackedMatMulWithSme2PackedB, MNNPackedMatMulFP16WithSme2PackedB_Fmlal);
         FUNC_PTR_ASSIGN(gInstance->MNNPackedMatMulRemainWithSme2PackedB, MNNPackedMatMulRemainFP16WithSme2PackedB_Fmlal);
-        FUNC_PTR_ASSIGN(gInstance->MNNPackedMatMulRemainWithSme2PackedBWide, MNNPackedMatMulRemainFP16WithSme2PackedB_FmlalWide);
-    } else {
-        FUNC_PTR_ASSIGN(gInstance->MNNPackedMatMulWithSme2PackedB, MNNPackedMatMulFP16WithSme2PackedB);
-        FUNC_PTR_ASSIGN(gInstance->MNNPackedMatMulRemainWithSme2PackedB, MNNPackedMatMulRemainFP16WithSme2PackedB);
+        FUNC_PTR_ASSIGN(gInstance->MNNPackedMatMulRemainWithSme2PackedBWide,
+                        MNNPackedMatMulRemainFP16WithSme2PackedB_FmlalWide);
     }
+#endif
 #endif
 
     // LinearAttention fp16 kernels

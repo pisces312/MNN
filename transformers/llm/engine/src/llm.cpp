@@ -15,11 +15,15 @@
 #include "prompt_cache_utils.hpp"
 #include <MNN/AutoTime.hpp>
 #include "core/TensorUtils.hpp"
+#include "core/AttentionMaskConvention.hpp"
 #include "cpp/ExprDebug.hpp"
 #include "llm/llm.hpp"
 #include "kvmeta.hpp"
 #include "llmconfig.hpp"
 #include "tokenizer/tokenizer.hpp"
+#ifdef MNN_LLM_TOKEN_COMPRESS
+#include "token_compressor.hpp"
+#endif
 #include "diskembedding.hpp"
 #include "sampler.hpp"
 #include "omni.hpp"
@@ -351,6 +355,7 @@ bool Llm::load() {
     // destroy the Backend, causing use-after-free when module destructor runs.
     mModulePool.clear();
     mModule.reset();
+    mMaskCache.clear();
     initRuntime();
     // init module status
     // 1. load vocab
@@ -454,31 +459,12 @@ bool Llm::load() {
     logitsLastIdx = _var<int>({-1}, {1});
     logitsAllIdx = _var<int>({0}, {1});
     // index match with seq_len
-    mAttentionMaskVarVec.resize(decode_type_num);
     mPositionIdsVarVec.resize(decode_type_num);
     for(int i = 0; i < decode_type_num; i++) {
         int index = 1;
         if(i > 0) {
             index = verify_length;
         }
-        // attentiion mask var
-        {
-            // Mask: lower triangular
-           if ((mConfig->backend_type() == "cpu" || mConfig->backend_type() == "metal") && mValidBlockSize.empty()) {
-               mAttentionMaskVarVec[i] = _Input({}, NCHW, halide_type_of<float>());
-               auto ptr = mAttentionMaskVarVec[i]->writeMap<float>();
-               ptr[0] = 0;
-           } else {
-                mAttentionMaskVarVec[i] = _Input({1, 1, index, index}, NCHW, halide_type_of<float>());
-                auto ptr = mAttentionMaskVarVec[i]->writeMap<float>();
-                for (int i = 0; i < index; i++) {
-                    for (int j = 0; j < index; j++) {
-                        ptr[index * i + j] = (j > i) * std::numeric_limits<float>::lowest();
-                    }
-                }
-           }
-        }
-
         if (mConfig->is_mrope()) {
             mPositionIdsVarVec[i] = _Input({mConfig->mrope_axes(), index}, NCHW, halide_type_of<int>());
         } else {
@@ -522,6 +508,11 @@ void Llm::tuning(TuneType type, std::vector<int> candidates) {
     }
     // FIXME: Currently OpenCL Don't support KVMeta
     if (mConfig->backend_type() == "opencl") {
+        return;
+    }
+    // The tuned hint (OP_ENCODER_NUMBER_FOR_COMMIT) is only read by the Metal and OpenCL backends. On Hexagon
+    // the 7 x 3 decode forwards below change nothing and cost about a second of startup on Qwen3.5-4B.
+    if (mConfig->backend_type() == "hexagon") {
         return;
     }
     int decode_seq = 1;
@@ -1121,11 +1112,19 @@ std::string Llm::apply_chat_template(const ChatMessages& chat_prompts) const {
 }
 
 std::vector<int> Llm::tokenizer_encode(const std::string& user_content) {
+#ifdef MNN_LLM_TOKEN_COMPRESS
+    return TokenCompression::encodePrompt(mTokenizer.get(), user_content, mConfig->token_compress());
+#else
     return mTokenizer->encode(user_content);
+#endif
 }
 
 std::vector<int> Llm::tokenizer_encode(const MultimodalPrompt& multimodal_input) {
+#ifdef MNN_LLM_TOKEN_COMPRESS
+    return TokenCompression::encodePrompt(mTokenizer.get(), multimodal_input.prompt_template, mConfig->token_compress());
+#else
     return mTokenizer->encode(multimodal_input.prompt_template);
+#endif
 }
 
 void Llm::response(const MultimodalPrompt& multimodal_input,
@@ -1606,96 +1605,42 @@ VARP Llm::gen_attention_mask(int seq_len) {
     if (mConfig->attention_mask() == "float") {
         // full and sliding mix, using normal mask
         if (mConfig->attention_type() == "mix") {
-            const int sliding_window = mConfig->sliding_window();
-            // mix attention mask
-            attentionMask = _Input({2, 1, 1, seq_len, kv_seq_len}, NCHW, halide_type_of<float>());
-            auto full_attn_ptr = attentionMask->writeMap<float>();
-            // full attn mask
-            for (int i = 0; i < seq_len; i++) {
-                const int query_pos = i + (kv_seq_len - seq_len);
-                for (int j = 0; j < kv_seq_len; j++) {
-                    if (j > query_pos) {
-                        full_attn_ptr[kv_seq_len * i + j] = std::numeric_limits<float>::lowest();
-                    } else {
-                        full_attn_ptr[kv_seq_len * i + j] = 0.0f;
-                    }
-                }
-            }
-            // sliding attn mask
-            auto sliding_attn_ptr = full_attn_ptr + seq_len * kv_seq_len;
-            const int query_pos_offset = kv_seq_len - seq_len;
-            for (int i = 0; i < seq_len; i++) {
-                const int query_pos = i + query_pos_offset;
-                for (int j = 0; j < kv_seq_len; j++) {
-                    const int key_pos = j;
-                    bool is_allowed = (key_pos <= query_pos) && (key_pos > query_pos - sliding_window);
-                    if (is_allowed) {
-                        sliding_attn_ptr[kv_seq_len * i + j] = 0.0f;
-                    } else {
-                        sliding_attn_ptr[kv_seq_len * i + j] = std::numeric_limits<float>::lowest();
-                    }
-                }
-            }
+            // Plane 0 full causal, plane 1 sliding window; the graph picks one per layer.
+            MaskRequest req;
+            req.seqLen   = seq_len;
+            req.kvSeqLen = kv_seq_len;
+            req.rank     = 4;  // -> {2, 1, 1, seq_len, kv_seq_len}
+            MaskPlane full;
+            full.type = AttentionMaskType::Causal;
+            MaskPlane sliding;
+            sliding.type          = AttentionMaskType::SlidingWindow;
+            sliding.slidingWindow = mConfig->sliding_window();
+            attentionMask = buildTwoPlaneMask(req, full, sliding);
             return attentionMask;
         }
         // Use square mask just for new generation token, save memory of attention mask
         kv_seq_len = seq_len;
-        if (mAttentionMaskVarVec.size() > 0) {
-            if(seq_len == 1) {
-                return mAttentionMaskVarVec[0];
-            }
-            if (mAttentionMaskVarVec.size() > 1 && seq_len == mDraftLength + 1) {
-                return mAttentionMaskVarVec[1];
-            }
-        }
 
-        // Mask: lower triangular
-        // Backends whose Attention op derives the causal mask itself take a scalar
-        // sentinel instead of an O(seqLen * kvLen) mask: it saves the host-side build
-        // plus the upload, and lets the kernel skip fully-masked kv blocks.
-        const std::string backendType = mConfig->backend_type();
-        const bool causalSentinel =
-            backendType == "cpu" || backendType == "hexagon" || backendType == "metal" || backendType == "opencl";
-        if (causalSentinel && mValidBlockSize.empty()) {
-            attentionMask = _Input({}, NCHW, halide_type_of<float>());
-            auto ptr = attentionMask->writeMap<float>();
-            ptr[0] = 0;
-        } else {
-            attentionMask = _Input({1, 1, seq_len, kv_seq_len}, NCHW, halide_type_of<float>());
-            auto ptr = attentionMask->writeMap<float>();
-            for (int i = 0; i < seq_len; i++) {
-                for (int j = 0; j < kv_seq_len; j++) {
-                    ptr[kv_seq_len * i + j] = (j > i) * std::numeric_limits<float>::lowest();
-                }
-            }
+        MaskRequest req;
+        req.type     = AttentionMaskType::Causal;
+        req.seqLen   = seq_len;
+        req.kvSeqLen = kv_seq_len;
+        req.rank     = 4;
+        // chunk_limits needs a stable mask rank across chunked forwards.
+        req.forceDense = !mValidBlockSize.empty();
+        if (seq_len == 1 || (mInSpec && seq_len == mDraftLength + 1)) {
+            return mMaskCache.obtain(req, mConfig->backend_type());
         }
+        attentionMask = buildAttentionMask(req, mConfig->backend_type());
         return attentionMask;
     } else {
+        // Reused across steps, refilled only when the shape changes.
         if (needNewVar(attentionMask, 2, seq_len, kv_seq_len)) {
             attentionMask = _Input({1, 1, seq_len, kv_seq_len}, NCHW, halide_type_of<int>());
         } else {
             return attentionMask;
         }
-        auto ptr = attentionMask->writeMap<int>();
-        if (mConfig->attention_mask() == "glm") {
-            // chatglm
-            for (int i = 0; i < seq_len * kv_seq_len; i++) {
-                ptr[i] = 0;
-            }
-            if (seq_len > 1) {
-                for (int i = 1; i < seq_len; i++) {
-                    ptr[seq_len * i - 1] = 1;
-                }
-            }
-        } else {
-            bool is_glm2 = mConfig->attention_mask() == "glm2";
-            for (int i = 0; i < seq_len; i++) {
-                for (int j = 0; j < kv_seq_len; j++) {
-                    int row              = i + mContext->all_seq_len;
-                    ptr[seq_len * i + j] = is_glm2 ? j > row : j <= row;
-                }
-            }
-        }
+        fillCausalInt(attentionMask->writeMap<int>(), seq_len, kv_seq_len, mContext->all_seq_len);
         return attentionMask;
     }
 }
