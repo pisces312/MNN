@@ -38,7 +38,7 @@
 # 开发 
 + 准备环境：
   + Android Studio
-  + NDK（与 `app/build.gradle` 保持一致，当前为 `27.2.12479018`）
+  + NDK（`app/build.gradle` 未声明 `ndkVersion`，AGP 8.7.3 默认取 SDK 内 NDK `27.0.12077973`）
   + `export ANDROID_NDK=${YOUR_NDK_ROOT}`
 + 克隆代码库：
   ```shell

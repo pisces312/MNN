@@ -14,7 +14,7 @@
 ### 环境前提
 
 - **Windows 侧（APK 构建）**：
-  - Git Bash;Java 17;`ANDROID_HOME` 或 `ANDROID_SDK_ROOT`(SDK 内需含 `build-tools/36.0.0` 与 NDK,app 侧 CMake 用 SDK NDK 27.2.12479018)
+  - Git Bash;JDK 17+（Gradle 9.4.1 支持 JDK 17–25，本机 `JAVA_HOME=D:\dev\jdk-25` 可直接构建。仅当 wrapper 降回 Gradle 8.x 时才必须切到 `D:\dev\jdk-17.0.2`，8.x 不支持在 JDK 25 上跑）;`ANDROID_HOME` 或 `ANDROID_SDK_ROOT`(SDK 内需含 `build-tools/36.0.0` 与 NDK;`app/build.gradle` **未**声明 `ndkVersion`，AGP 8.7.3 默认取 SDK NDK `27.0.12077973`，SDK 里已装)
   - release 签名需环境变量：`KEY_STORE_LOCATION` / `KEY_STORE_PASSWORD` / `KEY_ALIAS`(debug 不需要)
 - **WSL 侧（native 构建，发行版名 `Ubuntu`)**:
   - Android NDK r27d **Linux 版**，默认 `/mnt/d/dev/android-ndk-r27d`（可用 `ANDROID_NDK` 覆盖）
@@ -38,8 +38,12 @@ MSYS_NO_PATHCONV=1 wsl -d Ubuntu -- bash /mnt/d/3rd-party-projects/MNN/build_nat
 ### 重建 htp-ops 库（libMNN_htpops*.so，仅上游 hexagon 变更后需要）
 
 - **何时需要**：上游合并触及 `source/backend/hexagon/`（尤其 htp-ops-lib 或 DSP 命令协议）后，新 libMNN.so 与预编译 skel 协议会错配——症状是 hexagon backend 输出垃圾 token（如全是 8）。普通引擎变更不需要重编。2026-08 上游 `af19bb57`（vrmpy GEMV）即一例
-- **环境**：WSL + Hexagon SDK v6.6.0.0（`HTP_OPS_SDK_ENV` 已写入 WSL `~/.bashrc`；非交互 `wsl -- bash -c` 调用需先 `source ~/.bashrc`）。详见 `source/backend/hexagon/htp-ops-lib/AGENTS.md`
-- **命令**（WSL）：`cd source/backend/hexagon/htp-ops-lib && ./build.sh v81`（本机设备 SM8850 = v81）
+- **环境**：WSL + Hexagon SDK v6.6.0.0（`HTP_OPS_SDK_ENV` 已写入 WSL `~/.bashrc`；**非交互 `wsl -d Ubuntu -- bash` 不读 `~/.bashrc`**，而 `build.sh` 在未设置时回退到 `$HOME/third/hexagon/setup_sdk_env.source`（该路径不存在），表现为 `Hexagon SDK environment file not found` —— 必须显式 export）。详见 `source/backend/hexagon/htp-ops-lib/AGENTS.md`
+- **命令**（WSL，显式带环境变量，耗时约 1 分钟）：
+  ```bash
+  wsl -d Ubuntu -- bash -c 'export HTP_OPS_SDK_ENV=/home/pisces312/hexagon-sdk-v6.6.0.0/setup_sdk_env.source; cd /mnt/d/3rd-party-projects/MNN/source/backend/hexagon/htp-ops-lib && ./build.sh v81'
+  ```
+  （本机设备 SM8850 = v81。注意 `build.sh` 只在 v79 时自动生成 fallback 名的 skel，v81 需手工再拷一份，见下条）
 - **部署**：`outputs/` 下 `libMNN_htpops.so`、`libMNN_htpops_skelV81.so` 拷入 `app/src/main/jniLibs/arm64-v8a/`；skel 需同时放两份——arch 专用名 `libMNN_htpops_skelV81.so` 与 fallback 名 `libMNN_htpops_skel.so`（内容相同；host 侧按设备 arch 选名，查不到时回退 fallback 名）
 - 重建后随 jniLibs 一并 `git add` 提交（htp-ops 构建需 Hexagon SDK，同样无法快速复现）
 
@@ -68,6 +72,8 @@ MSYS_NO_PATHCONV=1 wsl -d Ubuntu -- bash /mnt/d/3rd-party-projects/MNN/build_nat
   `grep -a -o "[A-Za-z]*Hexagon[A-Za-z]*"`（应见 HexagonRuntime / HexagonBackend）
 - **`MNN_KLEIDIAI` 默认已由 ON 改 OFF**：两层开关（编译期 `MNN_KLEIDIAI` + 运行期 `enableKleidiAI`），本 fork 未设 `MNN_KLEIDIAI_DEFAULT_ON`，APK 内 KleidiAI kernel 从未启用，运行时零影响（详细调研文档已于 2026-10 上游同步时移除）
 - **本机无全局 Gradle 配置**（2026-10-18 起）：`D:\dev\.gradle`（GRADLE_USER_HOME）只有缓存，`init.d/` 已删除。曾短暂存在全局 `mirror.gradle`（allprojects 项目级仓库注入），与本机 28 个项目的 `FAIL_ON_PROJECT_REPS` 冲突导致构建直接失败——仓库镜像一律**项目级自治**（各项目 settings.gradle 自配；本 fork 的 aliyun 三镜像见 settings.gradle）。遇到依赖/插件下载 stall 时在对应项目 settings.gradle 内加镜像，**不要再建全局 init 脚本**
+- **Gradle 9.4.1 + JDK 25 已验证可用**（2026-10-30 实测）：本机用户级 `JAVA_HOME` 指向 2026-10 新装的 `D:\dev\jdk-25`，而 Gradle 8.x 不支持在 JDK 25 上运行，故 wrapper 由 8.9 升到 **9.4.1**（腾讯镜像源）。兼容性依据：Gradle 9.0 起官方最低支持 AGP 8.4.0（本仓库 AGP 8.7.3 达标）；Kotlin 2.1.21（KGP）与 configuration-cache 实测无问题。仅剩「Gradle 10 将移除的 API」告警，非阻塞。
+  缓存注意：`D:\dev\.gradle\wrapper\dists` 中 gradle-9.2.1/9.3.1/8.13.2 是**残缺下载**（只有 `.zip.part`），完整可用的是 **9.4.1 / 9.5.1 / 9.6.1 / 9.8.1-all**。
 - **合并前无冲突预检**（不动工作区）：
   `git merge-tree --write-tree --name-only HEAD upstream/master`，只输出一行 tree oid 即无冲突
 - 完整「同步上游 → 重编 → 验证 → bump → 发版」流程见 `.workbuddy/skills/mnn-fork-release/SKILL.md`
@@ -76,13 +82,13 @@ MSYS_NO_PATHCONV=1 wsl -d Ubuntu -- bash /mnt/d/3rd-party-projects/MNN/build_nat
 
 | 组件 | 版本 |
 |------|------|
-| MNN 引擎 | **3.6.0** |
-| App versionName | 0.8.3.4 (fork of upstream 0.8.3) |
-| App versionCode | 26081701 (日期式 YYMMDDNN) |
-| Gradle | 8.9 |
+| MNN 引擎 | **3.6.2** |
+| App versionName | 0.8.3.5 (fork of upstream 0.8.3) |
+| App versionCode | 26092601 (日期式 YYMMDDNN) |
+| Gradle | 9.4.1 |
 | AGP | 8.7.3 |
 | Kotlin | 2.1.21 |
-| NDK | 27.2.12479018 |
+| NDK | 27.0.12077973（AGP 8.7.3 默认，`app/build.gradle` 未声明 `ndkVersion`） |
 | compileSdk / targetSdk | 35 |
 | minSdk | 26 |
 
