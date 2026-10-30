@@ -15,6 +15,7 @@
 
 - **Windows 侧（APK 构建）**：
   - Git Bash;JDK 17+（Gradle 9.4.1 支持 JDK 17–25，本机 `JAVA_HOME=D:\dev\jdk-25` 可直接构建。仅当 wrapper 降回 Gradle 8.x 时才必须切到 `D:\dev\jdk-17.0.2`，8.x 不支持在 JDK 25 上跑）;`ANDROID_HOME` 或 `ANDROID_SDK_ROOT`(SDK 内需含 `build-tools/36.0.0` 与 NDK;`app/build.gradle` **未**声明 `ndkVersion`，AGP 8.7.3 默认取 SDK NDK `27.0.12077973`，SDK 里已装)
+  - **`release` 构建必须用 JDK 17**：JDK 25 下 debug 能过，但 release 会执行 `lintVital*Release`，AGP 8.7.3 的 lint(31.7.3) 在 JDK 25 上直接失败（`mnn_tts:lintVitalAnalyzeRelease FAILED`，异常信息只有一个版本串 `25.0.4.1`，无堆栈）。跑 release 前 `JAVA_HOME=D:\dev\jdk-17.0.2`（Gradle 9.4.1 最低支持 JDK 17，兼容）
   - release 签名需环境变量：`KEY_STORE_LOCATION` / `KEY_STORE_PASSWORD` / `KEY_ALIAS`(debug 不需要)
 - **WSL 侧（native 构建，发行版名 `Ubuntu`)**:
   - Android NDK r27d **Linux 版**，默认 `/mnt/d/dev/android-ndk-r27d`（可用 `ANDROID_NDK` 覆盖）
@@ -83,8 +84,8 @@ MSYS_NO_PATHCONV=1 wsl -d Ubuntu -- bash /mnt/d/3rd-party-projects/MNN/build_nat
 | 组件 | 版本 |
 |------|------|
 | MNN 引擎 | **3.6.2** |
-| App versionName | 0.8.3.5 (fork of upstream 0.8.3) |
-| App versionCode | 26092601 (日期式 YYMMDDNN) |
+| App versionName | 0.8.3.6 (fork of upstream 0.8.3) |
+| App versionCode | 26103001 (日期式 YYMMDDNN) |
 | Gradle | 9.4.1 |
 | AGP | 8.7.3 |
 | Kotlin | 2.1.21 |

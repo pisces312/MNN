@@ -18,6 +18,14 @@ set -e
 # causing apksigner to receive MSYS-style paths and throw IOException.
 unset MSYS_NO_PATHCONV MSYS2_ARG_CONV_EXCL
 
+# Make `java` (used by apksigner below) reachable when JAVA_HOME is set but not
+# exported onto PATH -- e.g. non-login shells under automation, where
+# `java: command not found` only shows up at the very last signing step after a
+# full successful Gradle build.
+if [[ -n "${JAVA_HOME:-}" && -d "$JAVA_HOME/bin" ]]; then
+    export PATH="$JAVA_HOME/bin:$PATH"
+fi
+
 BUILD_TYPE="${1:-release}"
 FLAVOR="${2:-standard}"
 SKIP_NATIVE=false
