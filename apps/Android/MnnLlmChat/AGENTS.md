@@ -84,7 +84,7 @@ MSYS_NO_PATHCONV=1 wsl -d Ubuntu -- bash /mnt/d/3rd-party-projects/MNN/build_nat
 | 组件 | 版本 |
 |------|------|
 | MNN 引擎 | **3.6.2** |
-| App versionName | 0.8.3.6 (fork of upstream 0.8.3) |
+| App versionName | 0.8.3.6-pisces312 (fork of upstream 0.8.3) |
 | App versionCode | 26103001 (日期式 YYMMDDNN) |
 | Gradle | 9.4.1 |
 | AGP | 8.7.3 |
@@ -99,12 +99,13 @@ MSYS_NO_PATHCONV=1 wsl -d Ubuntu -- bash /mnt/d/3rd-party-projects/MNN/build_nat
 
 ### versionName
 
-格式：`MAJOR.MINOR.PATCH.FORK_INC`
+格式：`MAJOR.MINOR.PATCH.FORK_INC[-pisces312]`
 
 - `MAJOR.MINOR.PATCH` 对齐 MNN 上游版本（如上游 0.8.3）
 - 第 4 段 `FORK_INC` 是 fork 增量号，从 1 开始，每次 fork 发布 +1
 - 上游版本升级时 `FORK_INC` 归零
-- 全部纯数字，禁止任何非数字字符（避免 `UpdateChecker.isNewerVersion()` 解析崩溃）
+- 4 段本身必须纯数字；发布版可再带 `-pisces312` 后缀（如 `0.8.3.6-pisces312`）标明构建来源
+- 后缀安全性：`UpdateChecker.isNewerVersion()` 的 `parseSeg()` 按数字前缀截断（`"6-pisces312"` → `6`），后缀不影响应用内版本比较。**数字前缀必须在**，不可写成 `pisces312-0.8.3.6`（会整段解析为 0）
 - fork 版本号永远是 4 段，上游最多 3 段，段数即可区分
 
 ### versionCode
@@ -113,8 +114,10 @@ MSYS_NO_PATHCONV=1 wsl -d Ubuntu -- bash /mnt/d/3rd-party-projects/MNN/build_nat
 
 ### Fork 标识
 
-`pisces` 作为 fork 代号，**不进入 versionName / versionCode**，只出现在：
-- APK 文件名：`MnnLlmChat-v0.8.3.3-pisces-standard-signed.apk`
+`pisces` 作为 fork 代号，**不进入 versionCode**，出现位置：
+- versionName 后缀（发布版）：`-pisces312`
+- APK 文件名：`MnnLlmChat-v0.8.3.6-pisces312-standard-signed.apk`
+  - 注意 `build.sh` 的命名模板是 `${VERSION}-${FORK_TAG}-${FLAVOR}-signed`，versionName 已含 `-pisces312` 时会拼成 `...-pisces312-pisces-...`，**发布前需手工裁掉重复的 `-pisces`**
 - `BuildConfig.FORK_TAG = "pisces"`（about 页 / 日志可读）
 - git 分支名：`feature/pisces-xxx`
 - GitHub Release 标题
