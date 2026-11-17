@@ -39,13 +39,13 @@ MSYS_NO_PATHCONV=1 wsl -d Ubuntu -- bash /mnt/d/3rd-party-projects/MNN/build_nat
 ### 重建 htp-ops 库（libMNN_htpops*.so，仅上游 hexagon 变更后需要）
 
 - **何时需要**：上游合并触及 `source/backend/hexagon/`（尤其 htp-ops-lib 或 DSP 命令协议）后，新 libMNN.so 与预编译 skel 协议会错配——症状是 hexagon backend 输出垃圾 token（如全是 8）。普通引擎变更不需要重编。2026-08 上游 `af19bb57`（vrmpy GEMV）即一例
-- **环境**：WSL + Hexagon SDK v6.6.0.0（`HTP_OPS_SDK_ENV` 已写入 WSL `~/.bashrc`；**非交互 `wsl -d Ubuntu -- bash` 不读 `~/.bashrc`**，而 `build.sh` 在未设置时回退到 `$HOME/third/hexagon/setup_sdk_env.source`（该路径不存在），表现为 `Hexagon SDK environment file not found` —— 必须显式 export）。详见 `source/backend/hexagon/htp-ops-lib/AGENTS.md`
-- **命令**（WSL，显式带环境变量，耗时约 1 分钟）：
+- **环境**：WSL + Hexagon SDK v6.7.0.0。走 `build_wsl.sh`，它默认指向 6.7 并已适配 toolv21 / 外部 NDK r27d / 系统 cmake（详见 `source/backend/hexagon/htp-ops-lib/AGENTS.md`）
+- **命令**（WSL，耗时约 1 分钟）：
   ```bash
-  wsl -d Ubuntu -- bash -c 'export HTP_OPS_SDK_ENV=/home/pisces312/hexagon-sdk-v6.6.0.0/setup_sdk_env.source; cd /mnt/d/3rd-party-projects/MNN/source/backend/hexagon/htp-ops-lib && ./build.sh v81'
+  wsl -d Ubuntu -- bash /mnt/d/3rd-party-projects/MNN/source/backend/hexagon/htp-ops-lib/build_wsl.sh v81
   ```
-  （本机设备 SM8850 = v81。注意 `build.sh` 只在 v79 时自动生成 fallback 名的 skel，v81 需手工再拷一份，见下条）
-- **部署**：`outputs/` 下 `libMNN_htpops.so`、`libMNN_htpops_skelV81.so` 拷入 `app/src/main/jniLibs/arm64-v8a/`；skel 需同时放两份——arch 专用名 `libMNN_htpops_skelV81.so` 与 fallback 名 `libMNN_htpops_skel.so`（内容相同；host 侧按设备 arch 选名，查不到时回退 fallback 名）
+  （本机设备 SM8850 = v81。脚本产出 `outputs/libMNN_htpops.so` 与 `outputs/libMNN_htpops_skel.so`）
+- **部署**：`outputs/` 下 `libMNN_htpops.so` 拷入 `app/src/main/jniLibs/arm64-v8a/`；skel 需同时放两份——arch 专用名 `libMNN_htpops_skelV81.so` 与 fallback 名 `libMNN_htpops_skel.so`（内容相同；host 侧按设备 arch 选名，查不到时回退 fallback 名）。部署前先 strip：`/home/pisces312/hexagon-sdk-v6.7.0.0/tools/HEXAGON_Tools/21.0.04/Tools/bin/hexagon-strip --strip-debug outputs/libMNN_htpops_skel.so`
 - 重建后随 jniLibs 一并 `git add` 提交（htp-ops 构建需 Hexagon SDK，同样无法快速复现）
 
 ### 重建 APK
