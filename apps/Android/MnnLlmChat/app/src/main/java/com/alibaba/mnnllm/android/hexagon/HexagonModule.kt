@@ -3,57 +3,86 @@
 package com.alibaba.mnnllm.android.hexagon
 
 import android.content.Context
+import android.os.Build
 import android.system.Os
 import android.util.Log
 import java.io.File
 
 /**
- * Hexagon NPU (cDSP) setup, mirrors the QNN integration in
- * [com.alibaba.mnnllm.android.qnn.QnnModule] but for bundled MNN HTP ops libs.
+ * Runtime setup for the MNN Hexagon (HTP/cDSP) backend, with bundled HTP ops libs.
  *
- * - libMNN_htpops.so (AArch64 FastRPC stub) ships in jniLibs and is dlopen'ed
- *   by bare soname from libMNN.so, so the app native lib dir must be (and is)
- *   on the linker search path.
- * - libMNN_htpops_skel.so (Q6DSP skeleton) is not loaded by the Android
- *   linker; FastRPC reads it from ADSP_LIBRARY_PATH. With legacy jniLibs
- *   packaging it is extracted to applicationInfo.nativeLibraryDir, which is
- *   world-readable so adsprpcd can access it.
- *
- * Must run before any class whose static initializer calls
- * System.loadLibrary("mnnllmapp") (e.g. CrashUtil), i.e. first thing in
- * MnnLlmApplication.onCreate().
+ * The backend is selected per-model through the same backend_type path as cpu/opencl, and is
+ * mutually exclusive with the QNN model path. libMNN.so dlopen()s the FastRPC stub
+ * (libMNN_htpops.so) by soname; FastRPC then loads the DSP skeleton from ADSP_LIBRARY_PATH. Both ship
+ * in the app native library dir. Set the search paths before any DSP session opens.
  */
 object HexagonModule {
     private const val TAG = "HexagonModule"
+    private const val STUB_LIB = "libMNN_htpops.so"
     private const val SKEL_LIB_NAME = "libMNN_htpops_skel.so"
 
     @Volatile
-    private var hexagonReady = false
+    private var prepared = false
 
-    fun setup(context: Context): Boolean {
-        if (hexagonReady) {
-            return true
+    // SOC_MODEL -> Hexagon arch. HTP needs FP16 HMX, i.e. Hexagon v73+ (8 Gen2+).
+    private val sSupportedSoc = hashMapOf<String, String>().apply {
+        put("SM8850", "V81")
+        put("SM8750", "V79")
+        put("SM8650", "V75")
+        put("SM8550", "V73")
+    }
+
+    private fun getSocModel(): String? {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            Build.SOC_MODEL
+        } else {
+            null
         }
-        val nativeLibDir = context.applicationInfo.nativeLibraryDir
-        if (!File(nativeLibDir, SKEL_LIB_NAME).exists()) {
-            // NOTE: Log instead of Timber - setup() runs before TimberConfig.initialize()
-            Log.i(TAG, "skel lib not found in $nativeLibDir, hexagon backend unavailable")
+    }
+
+    private fun nativeLibDir(context: Context): String = context.applicationInfo.nativeLibraryDir
+
+    /**
+     * Whether the Hexagon backend can be offered: supported SoC, FastRPC stub and DSP skeleton all
+     * packaged. QNN models never reach this path.
+     */
+    fun deviceSupported(context: Context): Boolean {
+        val soc = getSocModel()
+        if (soc == null || !sSupportedSoc.containsKey(soc)) {
             return false
         }
+        val dir = nativeLibDir(context)
+        if (!File(dir, STUB_LIB).exists() || !File(dir, SKEL_LIB_NAME).exists()) {
+            Log.w(TAG, "SoC $soc supported but hexagon libs not packaged, Hexagon disabled")
+            return false
+        }
+        return true
+    }
+
+    /**
+     * Point FastRPC at the packaged stub/skel. Safe to call more than once; only takes effect the
+     * first time. Must run before the model that uses the hexagon backend is loaded.
+     */
+    fun prepare(context: Context): Boolean {
+        if (prepared) {
+            return true
+        }
+        val path = nativeLibDir(context)
         return try {
-            Os.setenv(
-                "ADSP_LIBRARY_PATH",
-                "$nativeLibDir;/vendor/lib/rfsa/adsp;/system/lib/rfsa/adsp",
-                true
-            )
-            hexagonReady = true
-            Log.i(TAG, "ADSP_LIBRARY_PATH set to $nativeLibDir")
+            // Log instead of Timber: setup() runs before TimberConfig.initialize().
+            Os.setenv("ADSP_LIBRARY_PATH", "$path;/vendor/lib/rfsa/adsp;/system/lib/rfsa/adsp", true)
+            Os.setenv("LD_LIBRARY_PATH", path, true)
+            prepared = true
+            Log.i(TAG, "Hexagon lib path ready: $path (soc=${getSocModel()})")
             true
-        } catch (t: Throwable) {
-            Log.e(TAG, "setenv ADSP_LIBRARY_PATH failed", t)
+        } catch (e: Throwable) {
+            Log.e(TAG, "Hexagon prepare setenv failed", e)
             false
         }
     }
 
-    fun isReady(): Boolean = hexagonReady
+    // Called from MnnLlmApplication.onCreate, before Timber init.
+    fun setup(context: Context): Boolean = prepare(context)
+
+    fun isReady(): Boolean = prepared
 }

@@ -16,6 +16,7 @@ import com.alibaba.mls.api.ModelItem
 import com.alibaba.mnnllm.android.R
 import com.alibaba.mnnllm.android.databinding.FragmentSettingsSheetBinding
 import com.alibaba.mnnllm.android.databinding.SettingsRowSliderSwitchBinding
+import com.alibaba.mnnllm.android.hexagon.HexagonModule
 import com.alibaba.mnnllm.android.llm.LlmSession
 import com.alibaba.mnnllm.android.modelist.ModelListManager
 import com.alibaba.mnnllm.android.modelsettings.ModelConfig.Companion.defaultConfig
@@ -154,17 +155,15 @@ class SettingsBottomSheetFragment : BaseSettingsBottomSheetFragment() {
         }
 
         // Backend
-        val backendOptions = buildList {
-            add("cpu")
-            add("opencl")
-            // hexagon requires bundled htp-ops libs, see HexagonModule
-            if (com.alibaba.mnnllm.android.hexagon.HexagonModule.isReady()) {
-                add("hexagon")
-            }
-            // qnn(npu) requires bundled QNN libs, see QnnModule
-            if (com.alibaba.mnnllm.android.qnn.QnnModule.bundledReady()) {
-                add("npu")
-            }
+        val backendOptions = mutableListOf("cpu", "opencl")
+        // Hexagon (HTP/cDSP) is an alternative NPU path to QNN, offered only on supported devices
+        // where the FastRPC stub and skel are packaged. QNN models never reach this dropdown.
+        if (HexagonModule.deviceSupported(requireContext())) {
+            backendOptions.add("hexagon")
+        }
+        // qnn(npu) requires bundled QNN libs, see QnnModule
+        if (com.alibaba.mnnllm.android.qnn.QnnModule.bundledReady()) {
+            backendOptions.add("npu")
         }
         val currentBackend = currentConfig.backendType.takeIf { it in backendOptions } ?: "cpu"
         binding.dropdownBackend.setCurrentItem(currentBackend)

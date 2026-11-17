@@ -482,6 +482,7 @@ struct Omni::VisionProcessor {
     struct Idefics;
     struct MiniCPM;
     struct MiniCPM47;
+    struct MiniCPMOcr;
     struct Hunyuan;
     struct Gemma4;
     explicit VisionProcessor(Omni& omni) : mOmni(omni) {}
@@ -548,13 +549,16 @@ bool Omni::load() {
     bool res = true;
     if (mIsEmbedding || isQwen3TTSTalker(mConfig)) {
         initRuntime();
-        mTokenizer.reset(Tokenizer::createTokenizer(mConfig->tokenizer_file()));
+        mTokenizer.reset(Tokenizer::createTokenizer(mConfig->resource(mConfig->tokenizer_file())));
         if (mTokenizer == nullptr) {
             MNN_ERROR("[Error]: Failed to load tokenizer from: %s\n", mConfig->tokenizer_file().c_str());
             return false;
         }
         if (mIsEmbedding) {
             mDiskEmbedding.reset(new DiskEmbedding(mConfig));
+            if (!mDiskEmbedding->valid()) {
+                return false;
+            }
         }
         setChatTemplate();
     } else {
@@ -589,10 +593,9 @@ bool Omni::load() {
         auto model_path = mConfig->llm_model();
         auto weight_path = mConfig->llm_weight();
         MNN_PRINT("load %s ... ", model_path.c_str());
-        mRuntimeManager->setExternalFile(weight_path);
-        mModule.reset(Module::load({"input_ids", "attention_mask", "position_ids", "deepstack_embeds"},
-                                   {"sentence_embeddings"}, model_path.c_str(), mRuntimeManager, &module_config));
-        mRuntimeManager->setExternalFile("");
+        mModule.reset(mConfig->loadModule({"input_ids", "attention_mask", "position_ids", "deepstack_embeds"},
+                                          {"sentence_embeddings"}, model_path, mRuntimeManager, &module_config,
+                                          weight_path));
         if (nullptr == mModule.get()) {
             MNN_ERROR("[Omni:embedding] Module::load failed for %s\n", model_path.c_str());
             return false;
@@ -645,7 +648,7 @@ bool Omni::initProcessorRuntime() {
             MNN_ERROR("Unsupported %s descriptor\n", key.c_str());
             return false;
         }
-        module.reset(Module::load({}, {}, path.c_str(), mProcessorRuntimeManager, &moduleConfig));
+        module.reset(mConfig->loadModule({}, {}, path, mProcessorRuntimeManager, &moduleConfig));
         return module != nullptr;
     };
     if (mConfig->is_visual()) {
@@ -1127,12 +1130,13 @@ struct Omni::VisionProcessor::MiniCPM47 : MiniCPM {
         const int resolution = mOmni.mConfig->config_.value("image_size", 448);
         const int maxSlices = mOmni.mConfig->config_.value("vision_max_slice_nums", 9);
         const int bins = mOmni.mConfig->config_.value("vision_position_size", 70);
+        const int merge = mOmni.mConfig->config_.value("vision_merge_size", 4);
         int height = mOmni.mVisionHeight, width = mOmni.mVisionWidth;
         if (!mOmni.mVisionSizeOverridden) {
             height = image->getInfo()->dim[0];
             width = image->getInfo()->dim[1];
         }
-        if (patch <= 0 || resolution <= 0 || maxSlices < 1 || bins <= 0 || height <= 0 || width <= 0) {
+        if (patch <= 0 || resolution <= 0 || maxSlices < 1 || bins <= 0 || merge <= 0 || height <= 0 || width <= 0) {
             return {};
         }
         auto divide = [](double value, int unit) {
@@ -1144,7 +1148,7 @@ struct Omni::VisionProcessor::MiniCPM47 : MiniCPM {
                 h = static_cast<int>(resolution / std::sqrt(ratio));
                 w = static_cast<int>(h * ratio);
             }
-            return std::make_pair(divide(h, patch * 4), divide(w, patch * 4));
+            return std::make_pair(divide(h, patch * merge), divide(w, patch * merge));
         };
         int multiple = std::min(
             maxSlices, static_cast<int>(std::ceil(static_cast<double>(height) * width / (resolution * resolution))));
@@ -1388,6 +1392,13 @@ bool Omni::VisionProcessor::MiniCPM47::promptPositions(const std::vector<int>& i
     mNextPosition = currentPosition;
     return true;
 }
+
+struct Omni::VisionProcessor::MiniCPMOcr : MiniCPM47 {
+    using MiniCPM47::MiniCPM47;
+    // OCR keeps MiniCPM-V 4.7's slice layout but uses plain 1-D positions.
+    bool promptPositions(const std::vector<int>&) override { return true; }
+    int lastPosition() const override { return VisionProcessor::lastPosition(); }
+};
 
 struct Omni::VisionProcessor::Gemma4 : VisionProcessor {
     using VisionProcessor::VisionProcessor;
@@ -1659,7 +1670,12 @@ std::unique_ptr<Omni::VisionProcessor> Omni::VisionProcessor::create(Omni& o) {
         } else if (type == "tiles") {
             family = "idefics3";
         } else if (type == "resampler") {
-            family = o.mConfig->config_.value("vision_type", "") == "minicpmv4_7" ? "minicpmv4_7" : "minicpmv";
+            const std::string visionType = o.mConfig->config_.value("vision_type", "");
+            if (visionType == "minicpmv4_7" || visionType == "minicpm_ocr") {
+                family = visionType;
+            } else {
+                family = "minicpmv";
+            }
         } else if (type == "row_grid") {
             family = "hunyuan_vl";
         } else if (type == "padded_patches") {
@@ -1707,6 +1723,9 @@ std::unique_ptr<Omni::VisionProcessor> Omni::VisionProcessor::create(Omni& o) {
     }
     if (family == "minicpmv4_7") {
         return std::unique_ptr<VisionProcessor>(new MiniCPM47(o));
+    }
+    if (family == "minicpm_ocr") {
+        return std::unique_ptr<VisionProcessor>(new MiniCPMOcr(o));
     }
     if (family == "minicpmv") {
         return std::unique_ptr<VisionProcessor>(new MiniCPM(o));
@@ -2924,7 +2943,7 @@ bool Talker::load() {
         auxScheduleConfig.backendConfig = &auxBackendConfig;
         mQwen3RuntimeManager.reset(Executor::RuntimeManager::createRuntimeManager(auxScheduleConfig));
         setRuntimeHint(mQwen3RuntimeManager, true);
-        if (backend_type_convert(mConfig->backend_type()) != 0) { // not cpu
+        if (mConfig->diskCacheEnabled() && backend_type_convert(mConfig->backend_type()) != 0) { // not cpu
             // mRuntimeManager already claims "<tmp>/mnn_cachefile.bin"; a second manager
             // on the same path would clobber the talker's tuned shader cache.
             std::string tmpPath = mConfig->tmp_path().empty() ? "." : mConfig->tmp_path();
@@ -2935,18 +2954,17 @@ bool Talker::load() {
         module_config.rearrange = true;
         constexpr int hiddenSize = 1024;
 
-        mRuntimeManager->setExternalFile(mConfig->talker_weight().c_str());
-        mModule.reset(Module::load({"inputs_embeds", "attention_mask", "position_ids"}, {"logits", "hidden_states"},
-                                   mConfig->talker_model().c_str(), mRuntimeManager, &module_config),
+        mModule.reset(mConfig->loadModule({"inputs_embeds", "attention_mask", "position_ids"},
+                                          {"logits", "hidden_states"}, mConfig->talker_model(), mRuntimeManager,
+                                          &module_config, mConfig->talker_weight()),
                       Module::destroy);
-        mRuntimeManager->setExternalFile("");
 
-        mQwen3RuntimeManager->setExternalFile(mConfig->talker_weight().c_str());
-        mQwen3PromptEmbedder.reset(Module::load({"codec_embeds", "text_raw_embeds", "tts_raw_embeds"},
-                                                {"prompt_inputs_embeds", "trailing_text_hidden", "tts_pad_embed"},
-                                                mConfig->talker_model().c_str(), mQwen3RuntimeManager, &module_config),
-                                   Module::destroy);
-        mQwen3RuntimeManager->setExternalFile("");
+        mQwen3PromptEmbedder.reset(
+            mConfig->loadModule({"codec_embeds", "text_raw_embeds", "tts_raw_embeds"},
+                                {"prompt_inputs_embeds", "trailing_text_hidden", "tts_pad_embed"},
+                                mConfig->talker_model(), mQwen3RuntimeManager, &module_config,
+                                mConfig->talker_weight()),
+            Module::destroy);
 
         const bool cpIncremental = mConfig->audio_code_predictor_incremental();
         if (cpIncremental) {
@@ -2979,48 +2997,54 @@ bool Talker::load() {
             mQwen3CpRuntimeManager->setHintPtr(Interpreter::KVCACHE_INFO, mQwen3CpMeta.get());
         }
         auto cpManager = cpIncremental ? mQwen3CpRuntimeManager : mQwen3RuntimeManager;
-        cpManager->setExternalFile(mConfig->audio_code_predictor_weight().c_str());
+
         if (cpIncremental) {
-            mQwen3AudioCodePredictor.reset(
-                Module::load({"inputs_embeds", "attention_mask", "position_ids"}, {"logits"},
-                             mConfig->audio_code_predictor_model().c_str(), cpManager, &module_config),
-                Module::destroy);
+            mQwen3AudioCodePredictor.reset(mConfig->loadModule({"inputs_embeds", "attention_mask", "position_ids"},
+                                                               {"logits"}, mConfig->audio_code_predictor_model(),
+                                                               cpManager, &module_config,
+                                                               mConfig->audio_code_predictor_weight()),
+                                           Module::destroy);
         } else {
             mQwen3AudioCodePredictor.reset(
-                Module::load({"talker_hidden_states", "codec_embeds", "attention_mask", "position_ids"}, {"logits"},
-                             mConfig->audio_code_predictor_model().c_str(), cpManager, &module_config),
+                mConfig->loadModule({"talker_hidden_states", "codec_embeds", "attention_mask", "position_ids"},
+                                    {"logits"}, mConfig->audio_code_predictor_model(), cpManager, &module_config,
+                                    mConfig->audio_code_predictor_weight()),
                 Module::destroy);
         }
-        cpManager->setExternalFile("");
 
-        mQwen3RuntimeManager->setExternalFile(mConfig->codec_embedder_weight().c_str());
-        mQwen3CodecEmbedder.reset(Module::load({"codec_embeds", "text_hidden"}, {"inputs_embeds"},
-                                               mConfig->codec_embedder_model().c_str(), mQwen3RuntimeManager,
-                                               &module_config),
+        mQwen3CodecEmbedder.reset(mConfig->loadModule({"codec_embeds", "text_hidden"}, {"inputs_embeds"},
+                                                      mConfig->codec_embedder_model(), mQwen3RuntimeManager,
+                                                      &module_config, mConfig->codec_embedder_weight()),
                                   Module::destroy);
-        mQwen3RuntimeManager->setExternalFile("");
 
-        mQwen3RuntimeManager->setExternalFile(mConfig->speech_decoder_weight().c_str());
-        mQwen3SpeechDecoder.reset(Module::load({"codes"}, {"waveform"}, mConfig->speech_decoder_model().c_str(),
-                                               mQwen3RuntimeManager, &module_config),
+        mQwen3SpeechDecoder.reset(mConfig->loadModule({"codes"}, {"waveform"}, mConfig->speech_decoder_model(),
+                                                      mQwen3RuntimeManager, &module_config,
+                                                      mConfig->speech_decoder_weight()),
                                   Module::destroy);
-        mQwen3RuntimeManager->setExternalFile("");
 
-        mQwen3RuntimeManager->setExternalFile(mConfig->speaker_encoder_weight().c_str());
-        mQwen3SpeakerEncoder.reset(Module::load({"mels"}, {"speaker_embedding"},
-                                                mConfig->speaker_encoder_model().c_str(), mQwen3RuntimeManager,
-                                                &module_config),
+        mQwen3SpeakerEncoder.reset(mConfig->loadModule({"mels"}, {"speaker_embedding"},
+                                                       mConfig->speaker_encoder_model(), mQwen3RuntimeManager,
+                                                       &module_config, mConfig->speaker_encoder_weight()),
                                    Module::destroy);
-        mQwen3RuntimeManager->setExternalFile("");
+
         if (!mModule || !mQwen3PromptEmbedder || !mQwen3AudioCodePredictor || !mQwen3CodecEmbedder || !mQwen3SpeechDecoder ||
             !mQwen3SpeakerEncoder) {
             return false;
         }
         mDiskEmbedding.reset(new DiskEmbedding(mConfig, mConfig->talker_embedding_file()));
+        if (!mDiskEmbedding->valid()) {
+            return false;
+        }
         mQwen3TextEmbedding.reset(
             new DiskEmbedding(mConfig, mConfig->talker_text_embedding_file(), mConfig->talker_text_hidden_size()));
+        if (!mQwen3TextEmbedding->valid()) {
+            return false;
+        }
         mQwen3AudioCodePredictorEmbedding.reset(
             new DiskEmbedding(mConfig, mConfig->audio_code_predictor_embedding_file(), hiddenSize));
+        if (!mQwen3AudioCodePredictorEmbedding->valid()) {
+            return false;
+        }
         mMaxNewTokens = mConfig->talker_max_new_tokens();
         set_config("{\"sampler_type\":\"greedy\"}");
         mSampler.reset(Sampler::createSampler(mContext, mConfig));
@@ -3034,11 +3058,19 @@ bool Talker::load() {
         "\"temperature\": 0.9, \"topK\": 40, \"topP\": 0.8, \"penalty\": 1.05, \"penalty_window\": 64}");
     mSampler.reset(Sampler::createSampler(mContext, mConfig));
     mDiskEmbedding.reset(new DiskEmbedding(mConfig, mConfig->talker_embedding_file()));
+    if (!mDiskEmbedding->valid()) {
+        return false;
+    }
     // some embeddings
     mMaxNewTokens = mConfig->talker_max_new_tokens();
     mInterleaved = mConfig->interleaved();
     std::string speaker = mConfig->talker_speaker();
-    auto spk_dict = Express::Variable::loadMap(mConfig->spk_dict().c_str());
+    auto spk_dict = mConfig->loadVariables(mConfig->spk_dict());
+    if (!spk_dict.count(speaker + "_spk") || !spk_dict.count(speaker + "_cond") ||
+        !spk_dict.count(speaker + "_bos_token")) {
+        MNN_ERROR("Missing speaker resources: %s\n", speaker.c_str());
+        return false;
+    }
     mSpk = spk_dict[speaker + "_spk"];
     mCond = spk_dict[speaker + "_cond"];
     mTextBosToken = int(spk_dict[speaker + "_bos_token"]->readMap<float>()[0]);
@@ -3053,8 +3085,7 @@ bool Talker::load() {
     module_config.rearrange    = true;
     std::vector<std::string> inputNames {"inputs_embeds", "attention_mask", "position_ids", "logits_index"};
 
-    mModule.reset(Module::load(inputNames,
-                                    {"logits"}, mConfig->talker_model().c_str(), mRuntimeManager, &module_config));
+    mModule.reset(mConfig->loadModule(inputNames, {"logits"}, mConfig->talker_model(), mRuntimeManager, &module_config));
     if (mModule.get() == nullptr) {
         return false;
     }
@@ -3079,13 +3110,13 @@ bool Talker::load() {
         dit_runtime.reset(Executor::RuntimeManager::createRuntimeManager(ditSchedConfig));
     }
     // dit
-    mPreDit.reset(Module::load({"cond", "spk", "code"}, {"code_embeds", "rope", "mask"},
-                                mConfig->predit_model().c_str(), module_runtime, &module_config));
-    mDit.reset(Module::load({"x", "code_embeds", "rope", "mask", "time"}, {"mel"}, mConfig->dit_model().c_str(),
-                            dit_runtime, &module_config));
+    mPreDit.reset(mConfig->loadModule({"cond", "spk", "code"}, {"code_embeds", "rope", "mask"}, mConfig->predit_model(),
+                                      module_runtime, &module_config));
+    mDit.reset(mConfig->loadModule({"x", "code_embeds", "rope", "mask", "time"}, {"mel"}, mConfig->dit_model(),
+                                   dit_runtime, &module_config));
     // bigvgan
-    mBigvgan.reset(Module::load({"generated_mel"},
-                                {"waveform"}, mConfig->bigvgan_model().c_str(), module_runtime, &module_config));
+    mBigvgan.reset(
+        mConfig->loadModule({"generated_mel"}, {"waveform"}, mConfig->bigvgan_model(), module_runtime, &module_config));
     // autoregressive decode module
     mModulePool[std::make_pair(1, false)].reset(Module::clone(mModule.get()));
     // prefill module
