@@ -101,6 +101,12 @@ fi
 if [[ -z "$FORK_TAG" ]]; then
     FORK_TAG="upstream"
 fi
+# versionName may already embed the fork tag (e.g. 0.8.3.6-pisces312).
+# Skip the separate tag segment then, otherwise names get "-pisces312-pisces-".
+if [[ -n "$FORK_TAG" && "${VERSION,,}" == *"${FORK_TAG,,}"* ]]; then
+    FORK_TAG=""
+fi
+FORK_SUFFIX="${FORK_TAG:+-$FORK_TAG}"
 
 BUILD_TYPE_CAP="$(echo "$BUILD_TYPE" | sed 's/\b./\u&/')"
 FLAVOR_CAP="$(echo "$FLAVOR" | sed 's/\b./\u&/')"
@@ -175,7 +181,7 @@ fi
 SIGNED_APK=""
 if [[ "$BUILD_TYPE" == "release" ]]; then
     ALIGNED_APK="$BUILD_DIR/app-release-aligned.apk"
-    SIGNED_APK="$SCRIPT_DIR/MnnLlmChat-${VERSION}-${FORK_TAG}-${FLAVOR}-signed.apk"
+    SIGNED_APK="$SCRIPT_DIR/MnnLlmChat-${VERSION}${FORK_SUFFIX}-${FLAVOR}-signed.apk"
 
     echo "=== Aligning ==="
     "$BUILD_TOOLS/zipalign" -f 4 "$UNSIGNED_APK" "$ALIGNED_APK"
@@ -191,7 +197,7 @@ if [[ "$BUILD_TYPE" == "release" ]]; then
 
     rm -f "$ALIGNED_APK"
 else
-    SIGNED_APK="$SCRIPT_DIR/MnnLlmChat-${VERSION}-${FORK_TAG}-${FLAVOR}-debug.apk"
+    SIGNED_APK="$SCRIPT_DIR/MnnLlmChat-${VERSION}${FORK_SUFFIX}-${FLAVOR}-debug.apk"
     cp -f "$UNSIGNED_APK" "$SIGNED_APK"
 fi
 

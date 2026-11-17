@@ -23,9 +23,15 @@ MSYS_NO_PATHCONV=1 wsl -d Ubuntu -- bash /mnt/d/3rd-party-projects/MNN/source/ba
 ## 产物与部署
 
 - `outputs/libMNN_htpops.so`（Android aarch64 stub）
-- `outputs/libMNN_htpops_skel.so`（DSP skel，约 577KB，已 strip debug + 通过符号检查）
+- `outputs/libMNN_htpops_skel.so`（DSP skel，未 strip 约 2.4MB，通过符号检查）
 
-脚本自动 strip skel 并校验符号。部署到 app `jniLibs/arm64-v8a/` 时，skel 需放两份：arch 专用名 `libMNN_htpops_skelV81.so` 与 fallback 名 `libMNN_htpops_skel.so`（内容相同；host 侧按设备 arch 选名，查不到时回退 fallback）。新的 `*.so` 受 gitignore 限制需 `git add -f`。
+脚本校验架构与符号，**不自动 strip**。部署前手动 strip（路径用绝对路径裸写，`wsl bash -c` 里 `$VAR` 会被提前展开成空）：
+
+```bash
+MSYS_NO_PATHCONV=1 wsl -d Ubuntu -- bash -c 'cd /mnt/d/3rd-party-projects/MNN/source/backend/hexagon/htp-ops-lib && /home/pisces312/hexagon-sdk-v6.7.0.0/tools/HEXAGON_Tools/21.0.04/Tools/bin/hexagon-strip --strip-debug outputs/libMNN_htpops_skel.so'
+```
+
+strip 后约 577KB。再拷到 app `jniLibs/arm64-v8a/`：stub 用 `libMNN_htpops.so`，skel 需放两份——arch 专用名 `libMNN_htpops_skelV81.so` 与 fallback 名 `libMNN_htpops_skel.so`（内容相同；host 侧按设备 arch 选名，查不到时回退 fallback）。新的 `*.so` 受 gitignore 限制需 `git add -f`。
 
 ## 注意（6.7 适配踩坑）
 

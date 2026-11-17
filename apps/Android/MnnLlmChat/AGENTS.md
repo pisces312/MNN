@@ -45,17 +45,21 @@ MSYS_NO_PATHCONV=1 wsl -d Ubuntu -- bash /mnt/d/3rd-party-projects/MNN/build_nat
   wsl -d Ubuntu -- bash /mnt/d/3rd-party-projects/MNN/source/backend/hexagon/htp-ops-lib/build_wsl.sh v81
   ```
   （本机设备 SM8850 = v81。脚本产出 `outputs/libMNN_htpops.so` 与 `outputs/libMNN_htpops_skel.so`）
-- **部署**：`outputs/` 下 `libMNN_htpops.so` 拷入 `app/src/main/jniLibs/arm64-v8a/`；skel 需同时放两份——arch 专用名 `libMNN_htpops_skelV81.so` 与 fallback 名 `libMNN_htpops_skel.so`（内容相同；host 侧按设备 arch 选名，查不到时回退 fallback 名）。部署前先 strip：`/home/pisces312/hexagon-sdk-v6.7.0.0/tools/HEXAGON_Tools/21.0.04/Tools/bin/hexagon-strip --strip-debug outputs/libMNN_htpops_skel.so`
+- **部署**：`outputs/` 下 `libMNN_htpops.so` 拷入 `app/src/main/jniLibs/arm64-v8a/`；skel 需同时放两份——arch 专用名 `libMNN_htpops_skelV81.so` 与 fallback 名 `libMNN_htpops_skel.so`（内容相同；host 侧按设备 arch 选名，查不到时回退 fallback 名）。`build_wsl.sh` **不自动 strip**，部署前在 WSL 内用绝对路径手动 strip（`$VAR` 在 `wsl bash -c` 里会被展开成空，勿用变量）：
+  ```bash
+  MSYS_NO_PATHCONV=1 wsl -d Ubuntu -- bash -c 'cd /mnt/d/3rd-party-projects/MNN/source/backend/hexagon/htp-ops-lib && /home/pisces312/hexagon-sdk-v6.7.0.0/tools/HEXAGON_Tools/21.0.04/Tools/bin/hexagon-strip --strip-debug outputs/libMNN_htpops_skel.so'
+  ```
+  （skel 未 strip 约 2.4MB，strip 后约 577KB）
 - 重建后随 jniLibs 一并 `git add` 提交（htp-ops 构建需 Hexagon SDK，同样无法快速复现）
 
 ### 重建 APK
 
 ```bash
-./build.sh debug standard --skip-native    # 验证编译 → MnnLlmChat-*-pisces-standard-debug.apk
-./build.sh release standard --skip-native  # 签名包 → MnnLlmChat-*-pisces-standard-signed.apk
+./build.sh debug standard --skip-native    # 验证编译 → MnnLlmChat-v<ver>-standard-debug.apk
+./build.sh release standard --skip-native  # 签名包 → MnnLlmChat-v<ver>-standard-signed.apk
 ```
 
-- 产物在本目录（app 仓库根）下，版本号自动取自 `app/build.gradle` 的 `versionName`,fork tag 取自 `FORK_TAG`
+- 产物在本目录（app 仓库根）下，版本号自动取自 `app/build.gradle` 的 `versionName`。文件名中的 fork tag 段**仅当 versionName 不含 fork 标识时才追加**：当前 `versionName=0.8.3.6-pisces312` 已含标识，故文件名为 `MnnLlmChat-v0.8.3.6-pisces312-standard-*.apk`，不会再出现重复的 `-pisces312-pisces-`
 - **APK 必须在 Windows 构建**(JDK/Android SDK 路径不兼容 WSL);**native 必须在 WSL 构建**(NDK/QNN SDK 是 Linux 路径)。`build.sh` 内部已通过 `wsl -d Ubuntu` 处理跨界调用，无需手工切换
 - **上游合并后的完整 checklist**:① `build_native.sh --clean` 重建 libMNN.so;② 检查合并是否触及 `source/backend/hexagon/`，是则重编 htp-ops 库（见上节）;③ `./build.sh` 出 APK
 
@@ -117,7 +121,7 @@ MSYS_NO_PATHCONV=1 wsl -d Ubuntu -- bash /mnt/d/3rd-party-projects/MNN/build_nat
 `pisces` 作为 fork 代号，**不进入 versionCode**，出现位置：
 - versionName 后缀（发布版）：`-pisces312`
 - APK 文件名：`MnnLlmChat-v0.8.3.6-pisces312-standard-signed.apk`
-  - 注意 `build.sh` 的命名模板是 `${VERSION}-${FORK_TAG}-${FLAVOR}-signed`，versionName 已含 `-pisces312` 时会拼成 `...-pisces312-pisces-...`，**发布前需手工裁掉重复的 `-pisces`**
+  - `build.sh` 自动检测 versionName 已含 fork 标识时跳过 `FORK_TAG` 段，不会拼出重复的 `-pisces312-pisces-`；无需手工裁改文件名
 - `BuildConfig.FORK_TAG = "pisces"`（about 页 / 日志可读）
 - git 分支名：`feature/pisces-xxx`
 - GitHub Release 标题
